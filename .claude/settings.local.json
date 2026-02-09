@@ -1,0 +1,11 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(Remove-Item -Path \"D:\\\\PROD_REPO\\\\IIS\\\\prodHealtchCheck\\\\data\" -Recurse -Force -ErrorAction SilentlyContinue)",
+      "Bash(New-Item -ItemType Directory -Path \"D:\\\\PROD_REPO_DATA\\\\IIS\\\\prodHealtchCheck\" -Force)",
+      "Bash(powershell.exe -Command \"Remove-Item -Path ''D:\\\\PROD_REPO\\\\IIS\\\\prodHealtchCheck\\\\data'' -Recurse -Force -ErrorAction SilentlyContinue; New-Item -ItemType Directory -Path ''D:\\\\PROD_REPO_DATA\\\\IIS\\\\prodHealtchCheck'' -Force\")",
+      "Bash(powershell.exe -Command \"New-Item -ItemType Directory -Path ''D:\\\\PROD_REPO\\\\IIS\\\\prodHealtchCheck\\\\images'' -Force; Copy-Item ''D:\\\\PROD_REPO\\\\IIS\\\\LogsSite\\\\images\\\\logo.jpg'' ''D:\\\\PROD_REPO\\\\IIS\\\\prodHealtchCheck\\\\images\\\\''; Copy-Item ''D:\\\\PROD_REPO\\\\IIS\\\\LogsSite\\\\images\\\\icon.png'' ''D:\\\\PROD_REPO\\\\IIS\\\\prodHealtchCheck\\\\images\\\\''\")",
+      "Bash(powershell.exe -Command \"netsh advfirewall show domainprofile state\")"
+    ]
+  }
+}

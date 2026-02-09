@@ -1,0 +1,459 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="refresh" content="300">
+    <title>Server Health Monitor</title>
+    <link rel="icon" type="image/png" href="images/icon.png">
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #f5f5f5;
+            display: flex;
+            flex-direction: column;
+            min-height: 100vh;
+        }
+        .header {
+            background-color: #F6F6F6;
+            border-bottom: 2px solid #E60000;
+            padding: 15px 0;
+        }
+        .header-container {
+            display: flex;
+            align-items: center;
+            width: 95%;
+            margin: 0 auto;
+        }
+        .header .logo { height: 50px; margin-right: 20px; }
+        .header-title { font-size: 24px; font-weight: bold; color: #333; }
+        .header-info { margin-left: auto; text-align: right; font-size: 0.9em; color: #666; }
+        .header-info span { color: #E60000; font-weight: bold; }
+
+        .footer {
+            background-color: #F6F6F6;
+            border-top: 2px solid #E60000;
+            padding: 15px 0;
+            margin-top: auto;
+        }
+        .footer-container {
+            display: flex;
+            align-items: center;
+            width: 95%;
+            margin: 0 auto;
+        }
+        .footer .logo { height: 35px; margin-right: 15px; }
+        .footer-text { font-size: 14px; color: #666; }
+
+        .container {
+            width: 95%;
+            margin: 20px auto;
+            flex: 1;
+        }
+        .stats-bar {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-bottom: 20px;
+        }
+        .stat-card {
+            background: white;
+            padding: 15px;
+            border-radius: 8px;
+            text-align: center;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .stat-card .value { font-size: 2em; font-weight: bold; color: #E60000; }
+        .stat-card .label { color: #666; font-size: 0.9em; margin-top: 5px; }
+        .stat-card.success .value { color: #2e7d32; }
+        .stat-card.error .value { color: #c62828; }
+        .stat-card.warning .value { color: #f57c00; }
+
+        .filters {
+            margin-bottom: 20px;
+            padding: 15px;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .filters input {
+            width: 100%;
+            max-width: 400px;
+            padding: 10px 15px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            font-size: 14px;
+        }
+        .filters input:focus {
+            outline: none;
+            border-color: #E60000;
+            box-shadow: 0 0 0 2px rgba(230,0,0,0.2);
+        }
+
+        .server-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(480px, 1fr));
+            gap: 15px;
+        }
+        .server-card {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            border-left: 4px solid #2e7d32;
+        }
+        .server-card.error { border-left-color: #c62828; }
+        .server-card.warning { border-left-color: #f57c00; }
+
+        .server-name {
+            font-size: 1.1em;
+            font-weight: bold;
+            color: #333;
+            margin-bottom: 15px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .server-name .time { font-size: 0.75em; color: #888; font-weight: normal; }
+
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(2, 1fr);
+            gap: 10px;
+            margin-bottom: 12px;
+        }
+        .metric {
+            background: #f8f9fa;
+            padding: 10px;
+            border-radius: 4px;
+        }
+        .metric-label { font-size: 0.75em; color: #666; margin-bottom: 5px; }
+        .metric-value { font-size: 1em; font-weight: bold; color: #333; }
+
+        .progress-bar {
+            height: 6px;
+            background: #e0e0e0;
+            border-radius: 3px;
+            margin-top: 5px;
+            overflow: hidden;
+        }
+        .progress-fill { height: 100%; border-radius: 3px; }
+        .progress-fill.green { background: #4caf50; }
+        .progress-fill.yellow { background: #ff9800; }
+        .progress-fill.red { background: #f44336; }
+
+        .section { margin-top: 12px; }
+        .section-title {
+            font-size: 0.8em;
+            color: #666;
+            margin-bottom: 8px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        .disk-list { display: flex; flex-wrap: wrap; gap: 8px; }
+        .disk-item {
+            background: #f8f9fa;
+            padding: 8px 12px;
+            border-radius: 4px;
+            min-width: 120px;
+        }
+        .disk-item .drive { font-weight: bold; color: #333; }
+        .disk-item .space { font-size: 0.85em; color: #666; }
+
+        .top-process {
+            display: flex;
+            justify-content: space-between;
+            padding: 4px 0;
+            border-bottom: 1px solid #eee;
+            font-size: 0.85em;
+        }
+        .top-process:last-child { border-bottom: none; }
+
+        .service-list { display: flex; flex-wrap: wrap; gap: 5px; }
+        .service-badge {
+            padding: 4px 8px;
+            border-radius: 4px;
+            font-size: 0.75em;
+            background: #e0e0e0;
+        }
+        .service-badge.running { background: #c8e6c9; color: #2e7d32; }
+        .service-badge.stopped { background: #ffcdd2; color: #c62828; }
+
+        .status-badge {
+            display: inline-block;
+            padding: 4px 10px;
+            border-radius: 4px;
+            font-size: 0.8em;
+            font-weight: bold;
+        }
+        .status-on { background: #c8e6c9; color: #2e7d32; }
+        .status-off { background: #ffcdd2; color: #c62828; }
+        .status-unknown { background: #e0e0e0; color: #666; }
+
+        .firewall-list { font-size: 0.85em; }
+        .firewall-list div { margin-bottom: 4px; }
+
+        .error-message {
+            background: #ffebee;
+            color: #c62828;
+            padding: 10px;
+            border-radius: 4px;
+            font-size: 0.9em;
+        }
+        .loading {
+            text-align: center;
+            padding: 50px;
+            font-size: 1.2em;
+            color: #666;
+        }
+        .collapsible { cursor: pointer; user-select: none; }
+        .collapsible::before { content: "▼ "; font-size: 0.7em; }
+        .collapsible.collapsed::before { content: "► "; }
+        .collapsible-content { display: block; }
+        .collapsible-content.hidden { display: none; }
+
+        @media (max-width: 600px) {
+            .server-grid { grid-template-columns: 1fr; }
+            .metrics-grid { grid-template-columns: 1fr; }
+        }
+    </style>
+</head>
+<body>
+    <header class="header">
+        <div class="header-container">
+            <img src="images/logo.jpg" alt="Logo" class="logo">
+            <h1 class="header-title">Server Health Monitor</h1>
+            <div class="header-info">
+                <div>Ostatnia aktualizacja: <span id="lastUpdate">-</span></div>
+                <div>Czas zbierania: <span id="duration">-</span>s</div>
+            </div>
+        </div>
+    </header>
+
+    <div class="container">
+        <div class="stats-bar">
+            <div class="stat-card">
+                <div class="value" id="totalServers">-</div>
+                <div class="label">Wszystkie serwery</div>
+            </div>
+            <div class="stat-card success">
+                <div class="value" id="successServers">-</div>
+                <div class="label">Online</div>
+            </div>
+            <div class="stat-card error">
+                <div class="value" id="failedServers">-</div>
+                <div class="label">Offline / Blad</div>
+            </div>
+            <div class="stat-card warning">
+                <div class="value" id="criticalServers">-</div>
+                <div class="label">Krytyczne (CPU/RAM >90%)</div>
+            </div>
+        </div>
+
+        <div class="filters">
+            <input type="text" id="searchInput" placeholder="Szukaj serwera..." onkeyup="filterServers()">
+        </div>
+
+        <div id="serverGrid" class="server-grid">
+            <div class="loading">Ladowanie danych...</div>
+        </div>
+    </div>
+
+    <footer class="footer">
+        <div class="footer-container">
+            <img src="images/logo.jpg" alt="Logo" class="logo">
+            <span class="footer-text">Server Health Monitor</span>
+        </div>
+    </footer>
+
+    <script>
+        let serverData = null;
+
+        async function loadData() {
+            try {
+                const response = await fetch('api.aspx?' + Date.now());
+                serverData = await response.json();
+                updateUI();
+            } catch (error) {
+                document.getElementById('serverGrid').innerHTML =
+                    '<div class="error-message">Blad ladowania danych: ' + error.message + '</div>';
+            }
+        }
+
+        function getProgressClass(percent) {
+            if (percent >= 90) return 'red';
+            if (percent >= 70) return 'yellow';
+            return 'green';
+        }
+
+        function getServiceStateClass(state) {
+            if (!state) return '';
+            const s = state.toLowerCase();
+            if (s === 'running') return 'running';
+            if (s === 'stopped') return 'stopped';
+            return '';
+        }
+
+        function updateUI() {
+            if (!serverData) return;
+            document.getElementById('lastUpdate').textContent = serverData.LastUpdate;
+            document.getElementById('duration').textContent = serverData.CollectionDuration;
+            document.getElementById('totalServers').textContent = serverData.TotalServers;
+            document.getElementById('successServers').textContent = serverData.SuccessCount;
+            document.getElementById('failedServers').textContent = serverData.FailedCount;
+
+            let criticalCount = 0;
+            serverData.Servers.forEach(s => {
+                if (s.CPU >= 90 || (s.RAM && s.RAM.PercentUsed >= 90)) criticalCount++;
+            });
+            document.getElementById('criticalServers').textContent = criticalCount;
+            renderServers(serverData.Servers);
+        }
+
+        function renderServers(servers) {
+            const grid = document.getElementById('serverGrid');
+            if (!servers || servers.length === 0) {
+                grid.innerHTML = '<div class="loading">Brak danych</div>';
+                return;
+            }
+
+            grid.innerHTML = servers.map(server => {
+                const hasError = server.Error;
+                const isCritical = server.CPU >= 90 || (server.RAM && server.RAM.PercentUsed >= 90);
+                const cardClass = hasError ? 'error' : (isCritical ? 'warning' : '');
+
+                if (hasError) {
+                    return `
+                        <div class="server-card error" data-server="${server.ServerName}">
+                            <div class="server-name">
+                                ${server.ServerName}
+                                <span class="time">${server.CollectedAt || ''}</span>
+                            </div>
+                            <div class="error-message">${server.Error}</div>
+                        </div>
+                    `;
+                }
+
+                const cpuPercent = server.CPU || 0;
+                const ramPercent = server.RAM?.PercentUsed || 0;
+
+                return `
+                    <div class="server-card ${cardClass}" data-server="${server.ServerName}">
+                        <div class="server-name">
+                            ${server.ServerName}
+                            <span class="time">${server.CollectedAt || ''}</span>
+                        </div>
+
+                        <div class="metrics-grid">
+                            <div class="metric">
+                                <div class="metric-label">CPU</div>
+                                <div class="metric-value">${cpuPercent}%</div>
+                                <div class="progress-bar">
+                                    <div class="progress-fill ${getProgressClass(cpuPercent)}" style="width: ${cpuPercent}%"></div>
+                                </div>
+                            </div>
+                            <div class="metric">
+                                <div class="metric-label">RAM</div>
+                                <div class="metric-value">${ramPercent}% (${server.RAM?.UsedGB || 0}/${server.RAM?.TotalGB || 0} GB)</div>
+                                <div class="progress-bar">
+                                    <div class="progress-fill ${getProgressClass(ramPercent)}" style="width: ${ramPercent}%"></div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="section">
+                            <div class="section-title">Dyski</div>
+                            <div class="disk-list">
+                                ${(server.Disks || []).map(d => `
+                                    <div class="disk-item">
+                                        <div class="drive">${d.Drive}</div>
+                                        <div class="space">${d.FreeGB}/${d.TotalGB} GB wolne</div>
+                                        <div class="progress-bar">
+                                            <div class="progress-fill ${getProgressClass(100 - d.PercentFree)}" style="width: ${100 - d.PercentFree}%"></div>
+                                        </div>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        </div>
+
+                        <div class="metrics-grid" style="margin-top: 12px;">
+                            <div class="section">
+                                <div class="section-title collapsible" onclick="toggleSection(this)">Top 3 CPU</div>
+                                <div class="collapsible-content">
+                                    ${(server.TopCPUServices || []).map(p => `
+                                        <div class="top-process">
+                                            <span>${p.Name}</span>
+                                            <span>${p.CPUPercent}%</span>
+                                        </div>
+                                    `).join('')}
+                                </div>
+                            </div>
+                            <div class="section">
+                                <div class="section-title collapsible" onclick="toggleSection(this)">Top 3 RAM</div>
+                                <div class="collapsible-content">
+                                    ${(server.TopRAMServices || []).map(p => `
+                                        <div class="top-process">
+                                            <span>${p.Name}</span>
+                                            <span>${p.MemoryMB} MB</span>
+                                        </div>
+                                    `).join('')}
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="section">
+                            <div class="section-title collapsible" onclick="toggleSection(this)">
+                                Serwisy D:\\ (${(server.DServices || []).length})
+                            </div>
+                            <div class="collapsible-content">
+                                <div class="service-list">
+                                    ${(server.DServices || []).map(s => `
+                                        <span class="service-badge ${getServiceStateClass(s.State)}" title="${s.DisplayName}">
+                                            ${s.Name}: ${s.State}
+                                        </span>
+                                    `).join('')}
+                                    ${(server.DServices || []).length === 0 ? '<span style="color:#888">Brak</span>' : ''}
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="metrics-grid" style="margin-top: 12px;">
+                            <div class="section">
+                                <div class="section-title">Trellix</div>
+                                <span class="status-badge ${
+                                    server.TrellixStatus === 'Running' ? 'status-on' :
+                                    server.TrellixStatus === 'NotFound' ? 'status-unknown' : 'status-off'
+                                }">${server.TrellixStatus}</span>
+                            </div>
+                            <div class="section">
+                                <div class="section-title">Firewall</div>
+                                <div class="firewall-list">
+                                    <div>Domain: <span class="status-badge ${server.Firewall?.Domain ? 'status-on' : 'status-off'}">${server.Firewall?.Domain ? 'ON' : 'OFF'}</span></div>
+                                    <div>Private: <span class="status-badge ${server.Firewall?.Private ? 'status-on' : 'status-off'}">${server.Firewall?.Private ? 'ON' : 'OFF'}</span></div>
+                                    <div>Public: <span class="status-badge ${server.Firewall?.Public ? 'status-on' : 'status-off'}">${server.Firewall?.Public ? 'ON' : 'OFF'}</span></div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                `;
+            }).join('');
+        }
+
+        function toggleSection(element) {
+            element.classList.toggle('collapsed');
+            element.nextElementSibling.classList.toggle('hidden');
+        }
+
+        function filterServers() {
+            const search = document.getElementById('searchInput').value.toLowerCase();
+            document.querySelectorAll('.server-card').forEach(card => {
+                card.style.display = card.dataset.server.toLowerCase().includes(search) ? 'block' : 'none';
+            });
+        }
+
+        loadData();
+        setInterval(loadData, 300000);
+    </script>
+</body>
+</html>
