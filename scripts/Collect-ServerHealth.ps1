@@ -1,9 +1,14 @@
 #Requires -Version 5.1
 param(
-    [string]$ServerListPath = "D:\PROD_REPO_DATA\IIS\prodHealtchCheck\serverList.txt",
-    [string]$OutputPath = "D:\PROD_REPO_DATA\IIS\prodHealtchCheck\data\serverHealth.json",
+    [Parameter(Mandatory=$true)]
+    [ValidateSet("DCI", "Ferryt", "MarketPlanet", "MQ", "FileTransfer", "Klastry")]
+    [string]$Group,
     [int]$ThrottleLimit = 50
 )
+
+$BasePath = "D:\PROD_REPO_DATA\IIS\prodHealtchCheck"
+$ServerListPath = "$BasePath\serverList_$Group.txt"
+$OutputPath = "$BasePath\data\serverHealth_$Group.json"
 
 $ErrorActionPreference = "Continue"
 
@@ -19,7 +24,7 @@ $ScriptBlock = {
                 PercentFree = [math]::Round(($_.FreeSpace/$_.Size)*100,0)
             }
         })
-        CPU = (Get-WmiObject Win32_Processor).LoadPercentage
+        CPU = [math]::Round(((Get-WmiObject Win32_Processor).LoadPercentage | Measure-Object -Average).Average, 0)
         RAM = $(
             $os = Get-WmiObject Win32_OperatingSystem
             $total = [math]::Round($os.TotalVisibleMemorySize / 1MB, 1)
@@ -55,51 +60,55 @@ $ScriptBlock = {
 }
 
 # Wczytaj serwery
-if (-not (Test-Path $ServerListPath)) { Write-Error "Brak: $ServerListPath"; exit 1 }
+if (-not (Test-Path $ServerListPath)) { Write-Error "Brak pliku: $ServerListPath"; exit 1 }
 $servers = @(Get-Content $ServerListPath | Where-Object { $_ -match '\S' -and $_ -notmatch '^\s*#' } | ForEach-Object { $_.Trim() })
-if ($servers.Count -eq 0) { Write-Error "Pusta lista"; exit 1 }
+if ($servers.Count -eq 0) { Write-Error "Pusta lista dla grupy: $Group"; exit 1 }
 
-Write-Host "Zbieranie z $($servers.Count) serwerow..." -ForegroundColor Cyan
+Write-Host "[$Group] Zbieranie z $($servers.Count) serwerow..." -ForegroundColor Cyan
 $startTime = Get-Date
 
 # Wykonaj
 $results = Invoke-Command -ComputerName $servers -ScriptBlock $ScriptBlock -ThrottleLimit $ThrottleLimit -ErrorAction SilentlyContinue -ErrorVariable errs
 
-# Przetworzenie
-$allResults = @()
+# Przetworzenie - uzyj ArrayList zeby wymusic tablice
+$allResults = New-Object System.Collections.ArrayList
 $ok = @()
 
 foreach ($r in $results) {
     if ($r.ServerName) {
         $ok += $r.ServerName
-        $allResults += @{
+        [void]$allResults.Add(@{
             ServerName = $r.ServerName; CollectedAt = $r.CollectedAt; CPU = $r.CPU; RAM = $r.RAM
-            Disks = $r.Disks; TopCPUServices = $r.TopCPUServices; TopRAMServices = $r.TopRAMServices
-            DServices = $r.DServices; TrellixStatus = $r.TrellixStatus; Firewall = $r.Firewall
+            Disks = @($r.Disks); TopCPUServices = @($r.TopCPUServices); TopRAMServices = @($r.TopRAMServices)
+            DServices = @($r.DServices); TrellixStatus = $r.TrellixStatus; Firewall = $r.Firewall
             Error = $null
-        }
+        })
         Write-Host "  OK: $($r.ServerName)" -ForegroundColor Green
     }
 }
 
 foreach ($f in ($servers | Where-Object { $_ -notin $ok })) {
-    $allResults += @{
+    [void]$allResults.Add(@{
         ServerName = $f; CollectedAt = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss"); Error = "Timeout/Niedostepny"
         CPU = 0; RAM = @{}; Disks = @(); TopCPUServices = @(); TopRAMServices = @()
         DServices = @(); TrellixStatus = "Unknown"; Firewall = @{ Domain = $false; Private = $false; Public = $false }
-    }
+    })
     Write-Host "  FAIL: $f" -ForegroundColor Red
 }
 
 $duration = [math]::Round(((Get-Date) - $startTime).TotalSeconds, 1)
 
-@{
-    LastUpdate = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-    CollectionDuration = $duration
-    TotalServers = $servers.Count
-    SuccessCount = $ok.Count
-    FailedCount = ($servers.Count - $ok.Count)
-    Servers = $allResults | Sort-Object { $_.ServerName }
-} | ConvertTo-Json -Depth 10 -Compress | Out-File $OutputPath -Encoding UTF8 -Force
+# Sortuj
+$sortedList = New-Object System.Collections.ArrayList
+$allResults | Sort-Object { $_.ServerName } | ForEach-Object { [void]$sortedList.Add($_) }
 
-Write-Host "`nGotowe: ${duration}s (OK: $($ok.Count), FAIL: $($servers.Count - $ok.Count))" -ForegroundColor Green
+# Zbuduj JSON recznie zeby Servers ZAWSZE bylo tablica
+$serversJson = ($sortedList | ForEach-Object { $_ | ConvertTo-Json -Depth 10 -Compress }) -join ","
+
+$json = @"
+{"LastUpdate":"$((Get-Date).ToString("yyyy-MM-dd HH:mm:ss"))","CollectionDuration":$duration,"TotalServers":$($servers.Count),"SuccessCount":$($ok.Count),"FailedCount":$($servers.Count - $ok.Count),"Group":"$Group","Servers":[$serversJson]}
+"@
+
+$json | Out-File $OutputPath -Encoding UTF8 -Force
+
+Write-Host "`n[$Group] Gotowe: ${duration}s (OK: $($ok.Count), FAIL: $($servers.Count - $ok.Count))" -ForegroundColor Green
