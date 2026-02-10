@@ -111,3 +111,5 @@ $json = @"
 $json | Out-File $OutputPath -Encoding UTF8 -Force
 
 Write-Host "`n[$Group] Gotowe: ${duration}s (OK: $($ok.Count), FAIL: $($servers.Count - $ok.Count))" -ForegroundColor Green
+
+[Environment]::Exit(0)
