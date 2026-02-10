@@ -15,13 +15,36 @@
         {
             try
             {
+                string taskName = "Update IIS prodHealtchCheck";
+
+                // Sprawdz czy task juz dziala
+                ProcessStartInfo checkPsi = new ProcessStartInfo();
+                checkPsi.FileName = "schtasks.exe";
+                checkPsi.Arguments = "/Query /TN \"" + taskName + "\" /FO CSV /V";
+                checkPsi.UseShellExecute = false;
+                checkPsi.CreateNoWindow = true;
+                checkPsi.RedirectStandardOutput = true;
+
+                Process checkProcess = Process.Start(checkPsi);
+                string output = checkProcess.StandardOutput.ReadToEnd();
+                checkProcess.WaitForExit();
+
+                bool isRunning = output.Contains("Running") || output.Contains("Uruchomiony");
+
+                if (isRunning)
+                {
+                    Response.Write("{\"status\":\"running\",\"message\":\"Task juz dziala\"}");
+                    return;
+                }
+
+                // Uruchom task
                 ProcessStartInfo psi = new ProcessStartInfo();
                 psi.FileName = "schtasks.exe";
-                psi.Arguments = "/Run /TN \"Update IIS prodHealtchCheck\"";
+                psi.Arguments = "/Run /TN \"" + taskName + "\"";
                 psi.UseShellExecute = false;
                 psi.CreateNoWindow = true;
                 Process.Start(psi);
-                Response.Write("{\"status\":\"ok\",\"message\":\"Task uruchomiony\"}");
+                Response.Write("{\"status\":\"started\",\"message\":\"Task uruchomiony\"}");
             }
             catch (Exception ex)
             {

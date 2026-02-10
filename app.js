@@ -220,14 +220,24 @@ async function refreshData() {
     const oldUpdate = serverData?.LastUpdate;
 
     try {
-        await fetch('api.aspx?action=refresh&t=' + Date.now());
+        const refreshResponse = await fetch('api.aspx?action=refresh&t=' + Date.now());
+        const refreshResult = await refreshResponse.json();
+
+        if (refreshResult.status === 'running') {
+            modalText.textContent = 'Update juz trwa - czekam na zakonczenie...';
+        } else {
+            modalText.textContent = 'Odswiezanie danych...';
+        }
 
         let attempts = 0;
-        const maxAttempts = 60;
+        const maxAttempts = 120;
 
         const checkUpdate = async () => {
             attempts++;
-            modalText.textContent = 'Odswiezanie danych... (' + attempts + 's)';
+            const statusText = refreshResult.status === 'running'
+                ? 'Update w trakcie - czekam... (' + attempts + 's)'
+                : 'Odswiezanie danych... (' + attempts + 's)';
+            modalText.textContent = statusText;
 
             try {
                 const response = await fetch('api.aspx?group=' + currentGroup + '&t=' + Date.now());
