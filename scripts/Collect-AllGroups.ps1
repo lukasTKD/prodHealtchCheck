@@ -15,4 +15,4 @@ foreach ($Group in $Groups) {
 
 Write-Host "=== Zakonczono zbieranie dla wszystkich grup ===" -ForegroundColor Cyan
 
-[Environment]::Exit(0)
+exit 0

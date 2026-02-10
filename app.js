@@ -216,53 +216,102 @@ async function refreshData() {
     const modal = document.getElementById('refreshModal');
     const modalText = modal.querySelector('.modal-text');
     modal.classList.add('show');
+    modalText.textContent = 'Sprawdzanie statusu taska...';
 
     const oldUpdate = serverData?.LastUpdate;
 
     try {
-        const refreshResponse = await fetch('api.aspx?action=refresh&t=' + Date.now());
-        const refreshResult = await refreshResponse.json();
+        // Najpierw sprawdz status taska
+        const statusResponse = await fetch('api.aspx?action=taskstatus&t=' + Date.now());
+        const statusResult = await statusResponse.json();
 
-        if (refreshResult.status === 'running') {
-            modalText.textContent = 'Update juz trwa - czekam na zakonczenie...';
-        } else {
-            modalText.textContent = 'Odswiezanie danych...';
+        if (statusResult.status === 'error') {
+            modalText.textContent = 'Blad: ' + statusResult.message;
+            if (statusResult.debug) {
+                console.error('Debug:', statusResult.debug);
+            }
+            setTimeout(() => modal.classList.remove('show'), 5000);
+            return;
         }
 
-        let attempts = 0;
-        const maxAttempts = 120;
+        const taskState = statusResult.taskState;
 
-        const checkUpdate = async () => {
-            attempts++;
-            const statusText = refreshResult.status === 'running'
-                ? 'Update w trakcie - czekam... (' + attempts + 's)'
-                : 'Odswiezanie danych... (' + attempts + 's)';
-            modalText.textContent = statusText;
+        // Jesli task juz dziala - tylko czekaj na zakonczenie
+        if (taskState === 'Running') {
+            modalText.textContent = 'Update juz trwa - czekam na zakonczenie...';
+            waitForUpdate(oldUpdate, modal, modalText, true);
+            return;
+        }
 
-            try {
-                const response = await fetch('api.aspx?group=' + currentGroup + '&t=' + Date.now());
-                const data = await response.json();
+        // Jesli task jest gotowy (Ready) - uruchom go
+        if (taskState === 'Ready') {
+            modalText.textContent = 'Uruchamianie taska...';
 
-                if (data.LastUpdate && data.LastUpdate !== oldUpdate) {
-                    location.reload();
-                    return;
+            const refreshResponse = await fetch('api.aspx?action=refresh&t=' + Date.now());
+            const refreshResult = await refreshResponse.json();
+
+            if (refreshResult.status === 'error') {
+                modalText.textContent = 'Blad: ' + refreshResult.message;
+                if (refreshResult.debug) {
+                    console.error('Debug:', refreshResult.debug);
                 }
-            } catch (e) {}
-
-            if (attempts < maxAttempts) {
-                setTimeout(checkUpdate, 1000);
-            } else {
-                modalText.textContent = 'Timeout - odswiezam strone...';
-                setTimeout(() => location.reload(), 1000);
+                setTimeout(() => modal.classList.remove('show'), 5000);
+                return;
             }
-        };
 
-        setTimeout(checkUpdate, 2000);
+            if (refreshResult.status === 'started') {
+                modalText.textContent = 'Task uruchomiony - czekam na dane...';
+                waitForUpdate(oldUpdate, modal, modalText, false);
+                return;
+            }
+
+            if (refreshResult.status === 'blocked') {
+                modalText.textContent = 'Task nie jest gotowy: ' + refreshResult.taskState;
+                setTimeout(() => modal.classList.remove('show'), 5000);
+                return;
+            }
+        }
+
+        // Inny status - task nie jest gotowy
+        modalText.textContent = 'Task nie jest gotowy do uruchomienia (status: ' + taskState + ')';
+        setTimeout(() => modal.classList.remove('show'), 5000);
 
     } catch (error) {
         modalText.textContent = 'Blad: ' + error.message;
-        setTimeout(() => modal.classList.remove('show'), 3000);
+        setTimeout(() => modal.classList.remove('show'), 5000);
     }
+}
+
+function waitForUpdate(oldUpdate, modal, modalText, wasRunning) {
+    let attempts = 0;
+    const maxAttempts = 120;
+
+    const checkUpdate = async () => {
+        attempts++;
+        const statusText = wasRunning
+            ? 'Update w trakcie - czekam... (' + attempts + 's)'
+            : 'Odswiezanie danych... (' + attempts + 's)';
+        modalText.textContent = statusText;
+
+        try {
+            const response = await fetch('api.aspx?group=' + currentGroup + '&t=' + Date.now());
+            const data = await response.json();
+
+            if (data.LastUpdate && data.LastUpdate !== oldUpdate) {
+                location.reload();
+                return;
+            }
+        } catch (e) {}
+
+        if (attempts < maxAttempts) {
+            setTimeout(checkUpdate, 1000);
+        } else {
+            modalText.textContent = 'Timeout - odswiezam strone...';
+            setTimeout(() => location.reload(), 1000);
+        }
+    };
+
+    setTimeout(checkUpdate, 2000);
 }
 
 loadData();
