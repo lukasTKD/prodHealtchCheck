@@ -40,11 +40,8 @@ $ScriptBlock = {
             @{ Name = $_.Name; MemoryMB = [math]::Round($_.WorkingSet64/1MB,0) }
         })
         DServices = @(
-            $svc = Get-ItemProperty "HKLM:\SYSTEM\CurrentControlSet\Services\*" -EA SilentlyContinue | Where-Object { $_.ImagePath -and $_.ImagePath -match '[Dd]:\\' }
-            if ($svc) {
-                Get-Service -Name $svc.PSChildName -EA SilentlyContinue | ForEach-Object {
-                    @{ Name = $_.Name; DisplayName = $_.DisplayName; State = $_.Status.ToString() }
-                }
+            Get-CimInstance Win32_Service -EA SilentlyContinue | Where-Object { $_.PathName -match '[DE]:[/\\]' } | ForEach-Object {
+                @{ Name = $_.Name; DisplayName = $_.DisplayName; State = $_.State }
             }
         )
         TrellixStatus = @(

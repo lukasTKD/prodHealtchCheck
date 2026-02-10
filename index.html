@@ -34,9 +34,12 @@
                 <div class="value" id="failedServers">-</div>
                 <div class="label">Offline / Blad</div>
             </div>
-            <div class="stat-card warning">
+            <div class="stat-card warning clickable" onclick="filterCritical()">
                 <div class="value" id="criticalServers">-</div>
                 <div class="label">Krytyczne (CPU/RAM >90%)</div>
+            </div>
+            <div class="stat-card refresh">
+                <button class="refresh-btn" onclick="refreshData()">Odśwież dane</button>
             </div>
         </div>
 
@@ -262,6 +265,43 @@
             document.querySelectorAll('.server-card').forEach(card => {
                 card.style.display = card.dataset.server.toLowerCase().includes(search) ? 'block' : 'none';
             });
+        }
+
+        let criticalFilterActive = false;
+        function filterCritical() {
+            criticalFilterActive = !criticalFilterActive;
+            document.querySelector('.stat-card.warning').classList.toggle('active', criticalFilterActive);
+
+            if (criticalFilterActive) {
+                document.querySelectorAll('.server-card').forEach(card => {
+                    card.style.display = card.classList.contains('warning') ? 'block' : 'none';
+                });
+            } else {
+                document.querySelectorAll('.server-card').forEach(card => {
+                    card.style.display = 'block';
+                });
+                document.getElementById('searchInput').value = '';
+            }
+        }
+
+        async function refreshData() {
+            const btn = document.querySelector('.refresh-btn');
+            btn.disabled = true;
+            btn.textContent = 'Odświeżanie...';
+            try {
+                await fetch('api.aspx?action=refresh&t=' + Date.now());
+                btn.textContent = 'Uruchomiono!';
+                setTimeout(() => {
+                    btn.disabled = false;
+                    btn.textContent = 'Odśwież dane';
+                }, 3000);
+            } catch (error) {
+                btn.textContent = 'Błąd!';
+                setTimeout(() => {
+                    btn.disabled = false;
+                    btn.textContent = 'Odśwież dane';
+                }, 2000);
+            }
         }
 
         loadData();
