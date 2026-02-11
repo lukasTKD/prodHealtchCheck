@@ -52,14 +52,29 @@
         </div>
 
         <div class="tabs-container">
-            <div class="tabs">
-                <button class="tab active" data-group="DCI" onclick="switchTab('DCI')">Serwery dla: DCI</button>
-                <button class="tab" data-group="Ferryt" onclick="switchTab('Ferryt')">Serwery dla: Ferryt</button>
-                <button class="tab" data-group="MarketPlanet" onclick="switchTab('MarketPlanet')">Serwery dla: MarketPlanet</button>
-                <button class="tab" data-group="MQ" onclick="switchTab('MQ')">Serwery dla: MQ</button>
-                <button class="tab" data-group="FileTransfer" onclick="switchTab('FileTransfer')">Serwery dla: FileTransfer</button>
-                <button class="tab" data-group="Klastry" onclick="switchTab('Klastry')">Serwery dla: Klastry</button>
-                <button class="tab" data-group="DMZ" onclick="switchTab('DMZ')">Serwery dla: DMZ</button>
+            <div class="tabs-wrapper">
+                <div class="tabs-group">
+                    <div class="tabs-label">Kondycja serwerów (CPU, RAM, dyski, usługi, IIS)</div>
+                    <div class="tabs">
+                        <button class="tab active" data-group="DCI" onclick="switchTab('DCI')">DCI</button>
+                        <button class="tab" data-group="Ferryt" onclick="switchTab('Ferryt')">Ferryt</button>
+                        <button class="tab" data-group="MarketPlanet" onclick="switchTab('MarketPlanet')">MarketPlanet</button>
+                        <button class="tab" data-group="MQ" onclick="switchTab('MQ')">MQ</button>
+                        <button class="tab" data-group="FileTransfer" onclick="switchTab('FileTransfer')">FileTransfer</button>
+                        <button class="tab" data-group="Klastry" onclick="switchTab('Klastry')">Klastrowe</button>
+                        <button class="tab" data-group="DMZ" onclick="switchTab('DMZ')">DMZ</button>
+                    </div>
+                </div>
+                <div class="tabs-divider"></div>
+                <div class="tabs-group">
+                    <div class="tabs-label">Status infrastruktury</div>
+                    <div class="tabs">
+                        <button class="tab" data-group="1" onclick="switchTab('1')">Klastry Windows</button>
+                        <button class="tab" data-group="2" onclick="switchTab('2')">Udziały sieciowe</button>
+                        <button class="tab" data-group="3" onclick="switchTab('3')">Instancje SQL</button>
+                        <button class="tab" data-group="4" onclick="switchTab('4')">Kolejki MQ</button>
+                    </div>
+                </div>
             </div>
             <div class="filters">
                 <input type="text" id="searchInput" placeholder="Szukaj serwera..." onkeyup="filterServers()">

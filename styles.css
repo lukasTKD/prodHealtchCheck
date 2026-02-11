@@ -104,15 +104,40 @@ body {
 
 .tabs-container {
     margin-bottom: 20px;
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    padding: 15px;
+}
+.tabs-wrapper {
+    display: flex;
+    align-items: stretch;
+}
+.tabs-group {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    flex: 1;
+}
+.tabs-label {
+    font-weight: 600;
+    color: #333;
+    font-size: 0.9em;
+    white-space: nowrap;
+    text-align: center;
+}
+.tabs-divider {
+    width: 2px;
+    background: #E60000;
+    margin: 0 15px;
+    align-self: stretch;
 }
 .tabs {
     display: flex;
     flex-wrap: wrap;
     gap: 5px;
-    background: white;
-    padding: 10px 15px;
-    border-radius: 8px 8px 0 0;
-    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    justify-content: center;
 }
 .tab {
     padding: 10px 20px;
@@ -137,11 +162,9 @@ body {
     gap: 15px;
     align-items: center;
     flex-wrap: wrap;
-    padding: 15px;
-    background: white;
-    border-radius: 0 0 8px 8px;
-    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-    margin-top: -1px;
+    padding-top: 10px;
+    margin-top: 10px;
+    border-top: 1px solid #eee;
 }
 .filters input {
     flex: 1;
