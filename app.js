@@ -68,6 +68,7 @@ function renderServers(servers) {
                 <div class="server-card error" data-server="${server.ServerName}">
                     <div class="server-name">
                         ${server.ServerName}
+                        ${server.DMZGroup ? `<span class="dmz-group">${server.DMZGroup}</span>` : ''}
                         <span class="time">${server.CollectedAt || ''}</span>
                     </div>
                     <div class="error-message">${server.Error}</div>
@@ -82,6 +83,7 @@ function renderServers(servers) {
             <div class="server-card ${cardClass}" data-server="${server.ServerName}">
                 <div class="server-name">
                     ${server.ServerName}
+                    ${server.DMZGroup ? `<span class="dmz-group">${server.DMZGroup}</span>` : ''}
                     <span class="time">${server.CollectedAt || ''}</span>
                 </div>
 

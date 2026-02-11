@@ -6,15 +6,30 @@ param(
     [int]$ThrottleLimit = 50
 )
 
-# ========== KONFIGURACJA ==========
-$enableSCCM = 0   # 1 = wlaczone, 0 = wylaczone
-# ==================================
-
 $BasePath = "D:\PROD_REPO_DATA\IIS\prodHealtchCheck"
 $ServerListPath = "$BasePath\serverList_$Group.txt"
 $OutputPath = "$BasePath\data\serverHealth_$Group.json"
+$LogPath = "$BasePath\ServerHealthMonitor.log"
+$LogMaxAgeHours = 48
 
 $ErrorActionPreference = "Continue"
+
+# Funkcja logowania z rollowaniem
+function Write-Log {
+    param([string]$Message)
+
+    # Rollowanie logu co 48h
+    if (Test-Path $LogPath) {
+        $logFile = Get-Item $LogPath
+        if ($logFile.LastWriteTime -lt (Get-Date).AddHours(-$LogMaxAgeHours)) {
+            $archiveName = "$BasePath\ServerHealthMonitor_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+            Move-Item $LogPath $archiveName -Force
+        }
+    }
+
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    "$timestamp [$Group] $Message" | Out-File $LogPath -Append -Encoding UTF8
+}
 
 $ScriptBlock = {
     @{
@@ -81,44 +96,28 @@ $ScriptBlock = {
                 @{ Installed = $false }
             }
         )
-        PendingUpdates = $(
-            if ($using:enableSCCM -eq 1) {
-                try {
-                    $updates = Get-CimInstance -Namespace "root\ccm\clientsdk" -ClassName CCM_SoftwareUpdate -EA Stop
-                    if ($updates) {
-                        $available = @($updates | Where-Object { $_.EvaluationState -eq 1 })
-                        @{
-                            Enabled = $true
-                            Count = $available.Count
-                            Updates = @($available | Select-Object -First 10 | ForEach-Object {
-                                @{ Name = $_.Name; ArticleID = $_.ArticleID }
-                            })
-                        }
-                    } else {
-                        @{ Enabled = $true; Count = 0; Updates = @() }
-                    }
-                } catch {
-                    @{ Enabled = $true; Count = 0; Updates = @(); Error = $_.Exception.Message }
-                }
-            } else {
-                @{ Enabled = $false }
-            }
-        )
     }
 }
 
 # Wczytaj serwery
-if (-not (Test-Path $ServerListPath)) { Write-Error "Brak pliku: $ServerListPath"; exit 1 }
-$servers = @(Get-Content $ServerListPath | Where-Object { $_ -match '\S' -and $_ -notmatch '^\s*#' } | ForEach-Object { $_.Trim() })
-if ($servers.Count -eq 0) { Write-Error "Pusta lista dla grupy: $Group"; exit 1 }
+if (-not (Test-Path $ServerListPath)) {
+    Write-Log "BLAD: Brak pliku: $ServerListPath"
+    exit 1
+}
 
-Write-Host "[$Group] Zbieranie z $($servers.Count) serwerow..." -ForegroundColor Cyan
+$servers = @(Get-Content $ServerListPath | Where-Object { $_ -match '\S' -and $_ -notmatch '^\s*#' } | ForEach-Object { $_.Trim() })
+if ($servers.Count -eq 0) {
+    Write-Log "BLAD: Pusta lista serwerow"
+    exit 1
+}
+
+Write-Log "START zbierania z $($servers.Count) serwerow"
 $startTime = Get-Date
 
 # Wykonaj
 $results = Invoke-Command -ComputerName $servers -ScriptBlock $ScriptBlock -ThrottleLimit $ThrottleLimit -ErrorAction SilentlyContinue -ErrorVariable errs
 
-# Przetworzenie - uzyj ArrayList zeby wymusic tablice
+# Przetworzenie
 $allResults = New-Object System.Collections.ArrayList
 $ok = @()
 
@@ -126,24 +125,39 @@ foreach ($r in $results) {
     if ($r.ServerName) {
         $ok += $r.ServerName
         [void]$allResults.Add(@{
-            ServerName = $r.ServerName; CollectedAt = $r.CollectedAt; CPU = $r.CPU; RAM = $r.RAM
-            Disks = @($r.Disks); TopCPUServices = @($r.TopCPUServices); TopRAMServices = @($r.TopRAMServices)
-            DServices = @($r.DServices); TrellixStatus = @($r.TrellixStatus); Firewall = $r.Firewall
-            IIS = $r.IIS; PendingUpdates = $r.PendingUpdates
+            ServerName = $r.ServerName
+            CollectedAt = $r.CollectedAt
+            CPU = $r.CPU
+            RAM = $r.RAM
+            Disks = @($r.Disks)
+            TopCPUServices = @($r.TopCPUServices)
+            TopRAMServices = @($r.TopRAMServices)
+            DServices = @($r.DServices)
+            TrellixStatus = @($r.TrellixStatus)
+            Firewall = $r.Firewall
+            IIS = $r.IIS
             Error = $null
         })
-        Write-Host "  OK: $($r.ServerName)" -ForegroundColor Green
+        Write-Log "OK: $($r.ServerName)"
     }
 }
 
 foreach ($f in ($servers | Where-Object { $_ -notin $ok })) {
     [void]$allResults.Add(@{
-        ServerName = $f; CollectedAt = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss"); Error = "Timeout/Niedostepny"
-        CPU = 0; RAM = @{}; Disks = @(); TopCPUServices = @(); TopRAMServices = @()
-        DServices = @(); TrellixStatus = @(@{ Name = "Trellix"; State = "Unknown" }); Firewall = @{ Domain = $false; Private = $false; Public = $false }
-        IIS = @{ Installed = $false }; PendingUpdates = @{ Enabled = $false }
+        ServerName = $f
+        CollectedAt = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+        Error = "Timeout/Niedostepny"
+        CPU = 0
+        RAM = @{}
+        Disks = @()
+        TopCPUServices = @()
+        TopRAMServices = @()
+        DServices = @()
+        TrellixStatus = @(@{ Name = "Trellix"; State = "Unknown" })
+        Firewall = @{ Domain = $false; Private = $false; Public = $false }
+        IIS = @{ Installed = $false }
     })
-    Write-Host "  FAIL: $f" -ForegroundColor Red
+    Write-Log "FAIL: $f"
 }
 
 $duration = [math]::Round(((Get-Date) - $startTime).TotalSeconds, 1)
@@ -152,7 +166,7 @@ $duration = [math]::Round(((Get-Date) - $startTime).TotalSeconds, 1)
 $sortedList = New-Object System.Collections.ArrayList
 $allResults | Sort-Object { $_.ServerName } | ForEach-Object { [void]$sortedList.Add($_) }
 
-# Zbuduj JSON recznie zeby Servers ZAWSZE bylo tablica
+# Zbuduj JSON
 $serversJson = ($sortedList | ForEach-Object { $_ | ConvertTo-Json -Depth 10 -Compress }) -join ","
 
 $json = @"
@@ -161,4 +175,4 @@ $json = @"
 
 $json | Out-File $OutputPath -Encoding UTF8 -Force
 
-Write-Host "`n[$Group] Gotowe: ${duration}s (OK: $($ok.Count), FAIL: $($servers.Count - $ok.Count))" -ForegroundColor Green
+Write-Log "KONIEC: ${duration}s (OK: $($ok.Count), FAIL: $($servers.Count - $ok.Count))"
