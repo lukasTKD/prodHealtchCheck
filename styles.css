@@ -279,7 +279,122 @@ body {
 .collapsible-content { display: block; }
 .collapsible-content.hidden { display: none; }
 
+.iis-section {
+    background: #f0f7ff;
+    padding: 12px;
+    border-radius: 6px;
+    margin-top: 12px;
+    border: 1px solid #cce0ff;
+}
+.iis-section .section-title {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+.iis-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 15px;
+    margin-top: 10px;
+}
+.iis-column {
+    background: white;
+    padding: 10px;
+    border-radius: 4px;
+}
+.iis-subtitle {
+    font-size: 0.75em;
+    color: #666;
+    margin-bottom: 8px;
+    font-weight: 600;
+    text-transform: uppercase;
+}
+.iis-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 150px;
+    overflow-y: auto;
+}
+.iis-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 4px 0;
+    border-bottom: 1px solid #eee;
+    font-size: 0.85em;
+}
+.iis-item:last-child { border-bottom: none; }
+.iis-name {
+    flex: 1;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    margin-right: 8px;
+}
+
+.sccm-section {
+    background: #f5f5f5;
+    padding: 12px;
+    border-radius: 6px;
+    margin-top: 12px;
+    border: 1px solid #ddd;
+}
+.sccm-section.has-updates {
+    background: #fff8e1;
+    border-color: #ffb300;
+}
+.sccm-section .section-title {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+.update-count {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 24px;
+    height: 24px;
+    padding: 0 8px;
+    border-radius: 12px;
+    font-size: 0.8em;
+    font-weight: bold;
+}
+.update-count.ok {
+    background: #c8e6c9;
+    color: #2e7d32;
+}
+.update-count.pending {
+    background: #ffb300;
+    color: #fff;
+}
+.updates-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    margin-top: 10px;
+    max-height: 150px;
+    overflow-y: auto;
+}
+.update-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 6px 8px;
+    background: white;
+    border-radius: 4px;
+    font-size: 0.85em;
+    border-left: 3px solid #ffb300;
+}
+.update-name {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    font-weight: 500;
+}
+
 @media (max-width: 600px) {
     .server-grid { grid-template-columns: 1fr; }
     .metrics-grid { grid-template-columns: 1fr; }
+    .iis-grid { grid-template-columns: 1fr; }
 }

@@ -6,6 +6,10 @@ param(
     [int]$ThrottleLimit = 50
 )
 
+# ========== KONFIGURACJA ==========
+$enableSCCM = 0   # 1 = wlaczone, 0 = wylaczone
+# ==================================
+
 $BasePath = "D:\PROD_REPO_DATA\IIS\prodHealtchCheck"
 $ServerListPath = "$BasePath\serverList_$Group.txt"
 $OutputPath = "$BasePath\data\serverHealth_$Group.json"
@@ -55,6 +59,51 @@ $ScriptBlock = {
             Private = (Get-NetFirewallProfile -Name Private -EA SilentlyContinue).Enabled -eq $true
             Public = (Get-NetFirewallProfile -Name Public -EA SilentlyContinue).Enabled -eq $true
         }
+        IIS = $(
+            $iisService = Get-Service -Name W3SVC -EA SilentlyContinue
+            if ($iisService) {
+                try {
+                    Import-Module WebAdministration -EA Stop
+                    @{
+                        Installed = $true
+                        ServiceState = $iisService.Status.ToString()
+                        AppPools = @(Get-ChildItem IIS:\AppPools -EA SilentlyContinue | ForEach-Object {
+                            @{ Name = $_.Name; State = $_.State }
+                        })
+                        Sites = @(Get-ChildItem IIS:\Sites -EA SilentlyContinue | ForEach-Object {
+                            @{ Name = $_.Name; State = $_.State; Bindings = ($_.Bindings.Collection | ForEach-Object { $_.bindingInformation }) -join ", " }
+                        })
+                    }
+                } catch {
+                    @{ Installed = $true; ServiceState = $iisService.Status.ToString(); AppPools = @(); Sites = @(); Error = "Modul WebAdministration niedostepny" }
+                }
+            } else {
+                @{ Installed = $false }
+            }
+        )
+        PendingUpdates = $(
+            if ($using:enableSCCM -eq 1) {
+                try {
+                    $updates = Get-CimInstance -Namespace "root\ccm\clientsdk" -ClassName CCM_SoftwareUpdate -EA Stop
+                    if ($updates) {
+                        $available = @($updates | Where-Object { $_.EvaluationState -eq 1 })
+                        @{
+                            Enabled = $true
+                            Count = $available.Count
+                            Updates = @($available | Select-Object -First 10 | ForEach-Object {
+                                @{ Name = $_.Name; ArticleID = $_.ArticleID }
+                            })
+                        }
+                    } else {
+                        @{ Enabled = $true; Count = 0; Updates = @() }
+                    }
+                } catch {
+                    @{ Enabled = $true; Count = 0; Updates = @(); Error = $_.Exception.Message }
+                }
+            } else {
+                @{ Enabled = $false }
+            }
+        )
     }
 }
 
@@ -80,6 +129,7 @@ foreach ($r in $results) {
             ServerName = $r.ServerName; CollectedAt = $r.CollectedAt; CPU = $r.CPU; RAM = $r.RAM
             Disks = @($r.Disks); TopCPUServices = @($r.TopCPUServices); TopRAMServices = @($r.TopRAMServices)
             DServices = @($r.DServices); TrellixStatus = @($r.TrellixStatus); Firewall = $r.Firewall
+            IIS = $r.IIS; PendingUpdates = $r.PendingUpdates
             Error = $null
         })
         Write-Host "  OK: $($r.ServerName)" -ForegroundColor Green
@@ -91,6 +141,7 @@ foreach ($f in ($servers | Where-Object { $_ -notin $ok })) {
         ServerName = $f; CollectedAt = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss"); Error = "Timeout/Niedostepny"
         CPU = 0; RAM = @{}; Disks = @(); TopCPUServices = @(); TopRAMServices = @()
         DServices = @(); TrellixStatus = @(@{ Name = "Trellix"; State = "Unknown" }); Firewall = @{ Domain = $false; Private = $false; Public = $false }
+        IIS = @{ Installed = $false }; PendingUpdates = @{ Enabled = $false }
     })
     Write-Host "  FAIL: $f" -ForegroundColor Red
 }

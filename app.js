@@ -178,6 +178,65 @@ function renderServers(servers) {
                         </div>
                     </div>
                 </div>
+
+                ${server.IIS?.Installed ? `
+                <div class="section iis-section">
+                    <div class="section-title collapsible" onclick="toggleSection(this)">
+                        IIS <span class="service-badge ${getServiceStateClass(server.IIS.ServiceState)}">${server.IIS.ServiceState}</span>
+                    </div>
+                    <div class="collapsible-content">
+                        ${server.IIS.Error ? `<div class="error-message">${server.IIS.Error}</div>` : ''}
+                        <div class="iis-grid">
+                            <div class="iis-column">
+                                <div class="iis-subtitle">Application Pools (${(server.IIS.AppPools || []).length})</div>
+                                <div class="iis-list">
+                                    ${(server.IIS.AppPools || []).map(pool => `
+                                        <div class="iis-item">
+                                            <span class="iis-name">${pool.Name}</span>
+                                            <span class="status-badge ${pool.State === 'Started' ? 'status-on' : 'status-off'}">${pool.State}</span>
+                                        </div>
+                                    `).join('')}
+                                    ${(server.IIS.AppPools || []).length === 0 ? '<span style="color:#888">Brak</span>' : ''}
+                                </div>
+                            </div>
+                            <div class="iis-column">
+                                <div class="iis-subtitle">Sites (${(server.IIS.Sites || []).length})</div>
+                                <div class="iis-list">
+                                    ${(server.IIS.Sites || []).map(site => `
+                                        <div class="iis-item">
+                                            <span class="iis-name" title="${site.Bindings || ''}">${site.Name}</span>
+                                            <span class="status-badge ${site.State === 'Started' ? 'status-on' : 'status-off'}">${site.State}</span>
+                                        </div>
+                                    `).join('')}
+                                    ${(server.IIS.Sites || []).length === 0 ? '<span style="color:#888">Brak</span>' : ''}
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                ` : ''}
+
+                ${server.PendingUpdates?.Enabled ? `
+                <div class="section sccm-section ${server.PendingUpdates.Count > 0 ? 'has-updates' : ''}">
+                    <div class="section-title collapsible" onclick="toggleSection(this)">
+                        SCCM Updates
+                        <span class="update-count ${server.PendingUpdates.Count > 0 ? 'pending' : 'ok'}">
+                            ${server.PendingUpdates.Count}
+                        </span>
+                    </div>
+                    <div class="collapsible-content">
+                        ${server.PendingUpdates.Error ? `<div class="error-message">${server.PendingUpdates.Error}</div>` : ''}
+                        ${server.PendingUpdates.Count === 0 ? '<div style="color:#2e7d32;font-size:0.9em;">Brak oczekujacych aktualizacji</div>' : ''}
+                        <div class="updates-list">
+                            ${(server.PendingUpdates.Updates || []).map(upd => `
+                                <div class="update-item">
+                                    <span class="update-name" title="${upd.Name}">${upd.ArticleID ? 'KB' + upd.ArticleID : upd.Name}</span>
+                                </div>
+                            `).join('')}
+                        </div>
+                    </div>
+                </div>
+                ` : ''}
             </div>
         `;
     }).join('');
