@@ -292,9 +292,9 @@ body {
     gap: 10px;
 }
 .iis-grid {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    gap: 15px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
     margin-top: 10px;
 }
 .iis-column {
@@ -396,5 +396,4 @@ body {
 @media (max-width: 600px) {
     .server-grid { grid-template-columns: 1fr; }
     .metrics-grid { grid-template-columns: 1fr; }
-    .iis-grid { grid-template-columns: 1fr; }
 }
