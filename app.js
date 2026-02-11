@@ -375,5 +375,23 @@ function waitForUpdate(oldUpdate, modal, modalText, wasRunning) {
     setTimeout(checkUpdate, 2000);
 }
 
+// Sprawdza czy dane sie zmienily i laduje jesli tak
+async function checkForUpdates() {
+    try {
+        const response = await fetch('api.aspx?group=' + currentGroup + '&t=' + Date.now());
+        const data = await response.json();
+
+        if (data.LastUpdate && serverData && data.LastUpdate !== serverData.LastUpdate) {
+            serverData = data;
+            updateUI();
+        } else if (!serverData) {
+            serverData = data;
+            updateUI();
+        }
+    } catch (error) {
+        // Cicha obsluga bledu - nie przeszkadzaj uzytkownikowi
+    }
+}
+
 loadData();
-setInterval(loadData, 300000);
+setInterval(checkForUpdates, 60000); // Sprawdzaj co 60 sekund
