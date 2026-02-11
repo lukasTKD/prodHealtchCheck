@@ -14,7 +14,7 @@ System monitorowania stanu serwerów Windows z interfejsem webowym.
 - Obsługa serwerów w strefie DMZ (SSL/Negotiate)
 - Wyszukiwarka serwerów
 - Filtrowanie serwerów krytycznych (CPU/RAM >90%)
-- Auto-odświeżanie co 5 minut
+- Auto-odświeżanie przy zmianie danych (sprawdzanie co 60s)
 - Logowanie do pliku z rollowaniem co 48h
 
 ## Struktura projektu
@@ -224,6 +224,12 @@ D:\PROD_REPO_DATA\IIS\prodHealtchCheck\ServerHealthMonitor.log
 
 ## Zakładki
 
+Interfejs podzielony jest na dwie grupy zakładek oddzielone pionową linią:
+
+### Kondycja serwerów (CPU, RAM, dyski, usługi, IIS)
+
+Monitoring stanu serwerów - dane zbierane przez skrypty PowerShell.
+
 | Zakładka | Typ | Opis |
 |----------|-----|------|
 | DCI | LAN | Serwery DCI |
@@ -231,5 +237,25 @@ D:\PROD_REPO_DATA\IIS\prodHealtchCheck\ServerHealthMonitor.log
 | MarketPlanet | LAN | Serwery MarketPlanet |
 | MQ | LAN | Serwery kolejek |
 | FileTransfer | LAN | Serwery transferu plików |
-| Klastry | LAN | Klastry |
+| Klastrowe | LAN | Serwery klastrowe |
 | DMZ | DMZ | Serwery w strefie DMZ (SSL/Negotiate) |
+
+### Status infrastruktury
+
+Status usług i komponentów infrastruktury.
+
+| Zakładka | Opis |
+|----------|------|
+| Klastry Windows | Status klastrów Windows |
+| Udziały sieciowe | Lista udziałów FileShare |
+| Instancje SQL | Status baz danych SQL Server |
+| Kolejki MQ | Status kolejek IBM MQ |
+
+## Auto-odświeżanie
+
+Strona automatycznie sprawdza co **60 sekund** czy dane zostały zaktualizowane:
+- Porównuje `LastUpdate` z obecnymi danymi
+- Jeśli data się zmieniła - automatycznie ładuje nowe dane
+- Bez przeładowania całej strony (tylko dane)
+
+Dzięki temu po uruchomieniu skryptu `Collect-AllGroups.ps1` strona pokaże nowe dane w ciągu max 60 sekund.
