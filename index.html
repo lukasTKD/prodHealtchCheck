@@ -69,17 +69,19 @@
                 <div class="tabs-group">
                     <div class="tabs-label">Status infrastruktury</div>
                     <div class="tabs">
-                        <button class="tab" data-group="1" onclick="switchTab('1')">Klastry Windows</button>
-                        <button class="tab" data-group="2" onclick="switchTab('2')">Udziały sieciowe</button>
-                        <button class="tab" data-group="3" onclick="switchTab('3')">Instancje SQL</button>
-                        <button class="tab" data-group="4" onclick="switchTab('4')">Kolejki MQ</button>
+                        <button class="tab" data-group="ClustersWindows" onclick="switchTab('ClustersWindows')">Klastry Windows</button>
+                        <button class="tab" data-group="UdzialySieciowe" onclick="switchTab('UdzialySieciowe')">Udziały sieciowe</button>
+                        <button class="tab" data-group="InstancjeSQL" onclick="switchTab('InstancjeSQL')">Instancje SQL</button>
+                        <button class="tab" data-group="KolejkiMQ" onclick="switchTab('KolejkiMQ')">Kolejki MQ</button>
                     </div>
                 </div>
             </div>
-            <div class="filters">
+            <div class="filters" style="display:none;">
                 <input type="text" id="searchInput" placeholder="Szukaj serwera..." onkeyup="filterServers()">
             </div>
         </div>
+
+        <div id="tabSearchBar" class="tab-search-bar"></div>
 
         <div id="serverGrid" class="server-grid">
             <div class="loading">Ladowanie danych...</div>

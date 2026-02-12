@@ -180,6 +180,27 @@ body {
     box-shadow: 0 0 0 2px rgba(230,0,0,0.2);
 }
 
+/* === TAB SEARCH BAR === */
+.tab-search-bar {
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    padding: 15px;
+    margin-bottom: 20px;
+}
+.tab-search-input {
+    width: 100%;
+    padding: 10px 15px;
+    border: 1px solid #ccc;
+    border-radius: 4px;
+    font-size: 14px;
+}
+.tab-search-input:focus {
+    outline: none;
+    border-color: #E60000;
+    box-shadow: 0 0 0 2px rgba(230,0,0,0.2);
+}
+
 .server-grid {
     display: grid;
     grid-template-columns: repeat(auto-fill, minmax(480px, 1fr));
@@ -428,4 +449,272 @@ body {
 @media (max-width: 600px) {
     .server-grid { grid-template-columns: 1fr; }
     .metrics-grid { grid-template-columns: 1fr; }
+}
+
+/* =============================================================================
+   INFRASTRUKTURA - tabele
+   ============================================================================= */
+.infra-table {
+    overflow-x: auto;
+    margin-top: 8px;
+}
+.infra-table table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.85em;
+}
+.infra-table thead th {
+    background: #f0f0f0;
+    padding: 8px 10px;
+    text-align: left;
+    font-weight: 600;
+    color: #333;
+    border-bottom: 2px solid #ddd;
+    white-space: nowrap;
+}
+.infra-table tbody td {
+    padding: 6px 10px;
+    border-bottom: 1px solid #eee;
+    color: #444;
+}
+.infra-table tbody tr:hover {
+    background: #f8f9fa;
+}
+.infra-table tbody tr.row-error {
+    background: #ffebee;
+}
+.infra-table tbody tr.row-error:hover {
+    background: #ffcdd2;
+}
+.infra-table tbody tr.row-warn {
+    background: #fff8e1;
+}
+.infra-table tbody tr.row-warn:hover {
+    background: #fff3cb;
+}
+.infra-table .ip-cell {
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 0.9em;
+    color: #666;
+}
+.infra-table .path-cell {
+    font-family: 'Consolas', 'Courier New', monospace;
+    font-size: 0.9em;
+    color: #555;
+    max-width: 300px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+.infra-table .num-cell {
+    text-align: right;
+    font-family: 'Consolas', 'Courier New', monospace;
+}
+
+/* === KLASTRY WINDOWS - NOWY LAYOUT === */
+.cluster-container {
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    margin-bottom: 15px;
+    overflow: hidden;
+    grid-column: 1 / -1; /* Zajmuje pełną szerokość grida */
+}
+.cluster-header {
+    background: #c62828;
+    color: white;
+    padding: 15px 20px;
+    font-size: 1.2em;
+    font-weight: bold;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+.cluster-header.cluster-sql { background: #1565c0; }
+.cluster-header.cluster-fileshare { background: #f57c00; }
+.cluster-header.cluster-mq { background: #6a1b9a; }
+.cluster-header .cluster-type {
+    font-size: 0.7em;
+    background: rgba(255,255,255,0.2);
+    padding: 4px 10px;
+    border-radius: 12px;
+    margin-left: 10px;
+}
+.cluster-error {
+    background: #ffebee;
+    border-left: 4px solid #c62828;
+    padding: 15px 20px;
+    color: #c62828;
+    font-weight: 500;
+}
+.cluster-nodes {
+    display: flex;
+    gap: 0;
+    padding: 0;
+}
+.node-column {
+    flex: 1;
+    border-right: 2px solid #e0e0e0;
+    padding: 0;
+}
+.node-column:last-child {
+    border-right: none;
+}
+.node-header {
+    background: #f5f5f5;
+    padding: 12px 15px;
+    font-weight: 600;
+    font-size: 1em;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    border-bottom: 2px solid #e0e0e0;
+}
+.node-status-indicator {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    flex-shrink: 0;
+}
+.node-status-indicator.up { background: #4caf50; }
+.node-status-indicator.down { background: #f44336; }
+.node-info {
+    padding: 10px 15px;
+    font-size: 0.85em;
+    color: #666;
+    background: #fafafa;
+    border-bottom: 1px solid #e0e0e0;
+}
+.node-info div {
+    margin: 3px 0;
+}
+.node-info strong {
+    color: #333;
+    margin-right: 5px;
+}
+.node-roles {
+    padding: 0;
+}
+.role-item {
+    padding: 10px 15px;
+    border-bottom: 1px solid #e0e0e0;
+    font-size: 0.9em;
+    cursor: pointer;
+    transition: all 0.2s;
+}
+.role-item:hover {
+    background: #f5f5f5;
+}
+.role-item.role-online {
+    background: #e8f5e9;
+    border-left: 4px solid #4caf50;
+}
+.role-item.role-offline {
+    background: #ffebee;
+    border-left: 4px solid #f44336;
+}
+.role-item.role-mq {
+    background: #fff3e0;
+    border-left: 4px solid #ff9800;
+}
+.role-name {
+    font-weight: 600;
+    color: #333;
+    margin-bottom: 4px;
+}
+.role-details {
+    font-size: 0.85em;
+    color: #666;
+}
+.role-ip {
+    font-family: 'Courier New', monospace;
+    color: #1565c0;
+    font-size: 0.85em;
+    margin-top: 4px;
+}
+
+/* === KOLEJKI MQ - NOWY LAYOUT === */
+.mq-container {
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    margin-bottom: 15px;
+    overflow: hidden;
+    grid-column: 1 / -1;
+}
+.mq-header {
+    background: #6a1b9a;
+    color: white;
+    padding: 15px 20px;
+    font-size: 1.2em;
+    font-weight: bold;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+.mq-count {
+    font-size: 0.7em;
+    background: rgba(255,255,255,0.2);
+    padding: 4px 10px;
+    border-radius: 12px;
+}
+.mq-table {
+    padding: 0;
+}
+.mq-table table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.9em;
+}
+.mq-table thead {
+    background: #f5f5f5;
+    font-weight: 600;
+}
+.mq-table th {
+    padding: 12px 15px;
+    text-align: left;
+    border-bottom: 2px solid #e0e0e0;
+    color: #333;
+}
+.mq-table td {
+    padding: 10px 15px;
+    border-bottom: 1px solid #e0e0e0;
+    color: #444;
+}
+.mq-table tbody tr:hover {
+    background: #f5f5f5;
+}
+.mq-table tbody tr.row-error {
+    background: #ffebee;
+}
+.mq-server {
+    color: #666;
+    font-size: 0.9em;
+}
+
+/* === SEARCH HIGHLIGHTING === */
+mark.search-highlight {
+    background-color: #FFEB3B;
+    color: #333;
+    padding: 1px 3px;
+    border-radius: 3px;
+    font-weight: bold;
+    box-shadow: 0 0 0 1px rgba(255, 235, 59, 0.5);
+}
+.highlight-row {
+    background-color: #FFF9C4 !important;
+    border-left: 4px solid #FFEB3B !important;
+}
+.highlight-row:hover {
+    background-color: #FFF176 !important;
+}
+.highlight-card {
+    box-shadow: 0 0 0 3px #FFEB3B, 0 2px 8px rgba(255, 235, 59, 0.4) !important;
+    border-left-color: #FFEB3B !important;
+}
+.infra-table tbody tr.highlight-row td {
+    background-color: #FFF9C4;
+}
+.mq-table tbody tr.highlight-row td {
+    background-color: #FFF9C4;
 }

@@ -119,6 +119,41 @@
         }
 
         string group = Request.QueryString["group"];
+        string type = Request.QueryString["type"];
+
+        // Obsługa danych infrastrukturalnych
+        if (type == "infra")
+        {
+            // Walidacja nazwy grupy infra - tylko litery
+            if (string.IsNullOrEmpty(group) || !Regex.IsMatch(group, "^[a-zA-Z]+$"))
+            {
+                Response.StatusCode = 400;
+                Response.Write("{\"error\":\"Nieprawidlowa nazwa grupy infrastruktury\"}");
+                return;
+            }
+
+            string infraPath = @"D:\PROD_REPO_DATA\IIS\prodHealtchCheck\data\infra_" + group + ".json";
+
+            try
+            {
+                if (File.Exists(infraPath))
+                {
+                    string json = File.ReadAllText(infraPath);
+                    Response.Write(json);
+                }
+                else
+                {
+                    Response.StatusCode = 404;
+                    Response.Write("{\"error\":\"Brak danych infrastruktury dla: " + group + "\"}");
+                }
+            }
+            catch (Exception ex)
+            {
+                Response.StatusCode = 500;
+                Response.Write("{\"error\":\"" + ex.Message.Replace("\"", "'") + "\"}");
+            }
+            return;
+        }
 
         // Walidacja nazwy grupy - tylko litery
         if (string.IsNullOrEmpty(group) || !Regex.IsMatch(group, "^[a-zA-Z]+$"))

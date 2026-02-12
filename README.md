@@ -4,6 +4,7 @@ System monitorowania stanu serwerów Windows z interfejsem webowym.
 
 ## Funkcje
 
+### Kondycja serwerów
 - Monitorowanie CPU, RAM, dysków
 - Top 3 procesy zużywające CPU i RAM
 - Status usług z dysku D:\ i E:\
@@ -12,8 +13,16 @@ System monitorowania stanu serwerów Windows z interfejsem webowym.
 - Status IIS (Application Pools, Sites)
 - Grupowanie serwerów w zakładki (LAN + DMZ)
 - Obsługa serwerów w strefie DMZ (SSL/Negotiate)
-- Wyszukiwarka serwerów
 - Filtrowanie serwerów krytycznych (CPU/RAM >90%)
+
+### Infrastruktura
+- **Klastry Windows** — węzły, role, IP, status (Online/Offline) z podziałem na typy (SQL/FileShare/MQ)
+- **Udziały sieciowe** — nazwa udziału, ścieżka, stan (Online/Offline)
+- **Instancje SQL** — wersja SQL Server, ilość baz; per baza: nazwa, stan, compatibility level
+- **Kolejki MQ** — QManager, status (Running/inne), port listenera, nazwy kolejek, serwer
+
+### Ogólne
+- Wyszukiwarka z podświetlaniem wyników (działa we wszystkich zakładkach)
 - Auto-odświeżanie przy zmianie danych (sprawdzanie co 60s)
 - Logowanie do pliku z rollowaniem co 48h
 
@@ -22,7 +31,7 @@ System monitorowania stanu serwerów Windows z interfejsem webowym.
 ```
 prodHealtchCheck/
 ├── index.html                 # Frontend - dashboard
-├── app.js                     # Logika JavaScript
+├── app.js                     # Logika JavaScript (serwery + infrastruktura)
 ├── styles.css                 # Style CSS
 ├── api.aspx                   # Backend - API zwracające JSON
 ├── web.config                 # Konfiguracja IIS
@@ -31,9 +40,11 @@ prodHealtchCheck/
 │   ├── favicon.png
 │   └── icon.png
 ├── scripts/
-│   ├── Collect-ServerHealth.ps1      # Skrypt zbierający dane (grupy LAN)
-│   ├── Collect-ServerHealth-DMZ.ps1  # Skrypt zbierający dane (grupy DMZ)
-│   ├── Collect-AllGroups.ps1         # Skrypt zbiorczy (LAN + DMZ)
+│   ├── Collect-ServerHealth.ps1      # Zbieranie danych serwerów (grupy LAN)
+│   ├── Collect-ServerHealth-DMZ.ps1  # Zbieranie danych serwerów (grupy DMZ)
+│   ├── Collect-ClusterStatus.ps1     # Status klastrów Windows (co 5 min)
+│   ├── Collect-InfraDaily.ps1        # Dane infrastruktury (raz dziennie)
+│   ├── Collect-AllGroups.ps1         # Skrypt zbiorczy (LAN + DMZ + Klastry)
 │   ├── Encrypt-Password.ps1          # Szyfrowanie haseł dla DMZ
 │   └── Create-ServerListTemplates.ps1
 ├── README.md
@@ -51,7 +62,11 @@ D:\PROD_REPO_DATA\IIS\prodHealtchCheck\
 │   ├── serverHealth_MQ.json
 │   ├── serverHealth_FileTransfer.json
 │   ├── serverHealth_Klastry.json
-│   └── serverHealth_DMZ.json          # Dane z serwerów DMZ
+│   ├── serverHealth_DMZ.json          # Dane z serwerów DMZ
+│   ├── infra_ClustersWindows.json     # Status klastrów (co 5 min)
+│   ├── infra_UdzialySieciowe.json     # Udziały sieciowe (raz dziennie)
+│   ├── infra_InstancjeSQL.json        # Instancje SQL (raz dziennie)
+│   └── infra_KolejkiMQ.json          # Kolejki MQ (raz dziennie)
 ├── serverList_DCI.txt                  # Lista serwerów LAN
 ├── serverList_Ferryt.txt
 ├── serverList_MarketPlanet.txt
@@ -59,7 +74,11 @@ D:\PROD_REPO_DATA\IIS\prodHealtchCheck\
 ├── serverList_FileTransfer.txt
 ├── serverList_Klastry.txt
 ├── serverList_DMZ.json                 # Konfiguracja DMZ (JSON z grupami)
+├── config_mq.json                      # Konfiguracja kolejek MQ (opcjonalna)
 └── ServerHealthMonitor.log             # Plik logu (rollowany co 48h)
+
+D:\PROD_REPO_DATA\IIS\Cluster\
+└── clusters.json                       # Konfiguracja klastrów (SQL + FileShare)
 ```
 
 ## Instalacja
@@ -99,14 +118,33 @@ D:\PROD_REPO_DATA\IIS\prodHealtchCheck\
 .\scripts\Collect-ServerHealth.ps1 -Group DCI
 ```
 
-**Wszystkie grupy:**
+**Wszystkie grupy (LAN + DMZ + Klastry):**
 ```powershell
 .\scripts\Collect-AllGroups.ps1
 ```
 
+**Tylko status klastrów:**
+```powershell
+.\scripts\Collect-ClusterStatus.ps1
+```
+
+**Dane infrastruktury (udziały, SQL, MQ):**
+```powershell
+.\scripts\Collect-InfraDaily.ps1
+```
+
+**Konwersja testowych CSV na JSON:**
+```powershell
+.\scripts\Convert-CSVToJSON.ps1
+```
+(Używane tylko do testowania - w produkcji dane są zbierane automatycznie przez skrypty)
+
 ### Harmonogram (Task Scheduler)
 
-Utwórz zadanie uruchamiające `Collect-AllGroups.ps1` co X minut.
+| Task | Skrypt | Częstotliwość |
+|------|--------|---------------|
+| Kondycja + Klastry | `Collect-AllGroups.ps1` | Co 5 minut |
+| Infrastruktura | `Collect-InfraDaily.ps1` | Raz dziennie (np. 6:00) |
 
 ## Format pliku z listą serwerów
 
@@ -119,22 +157,20 @@ SERVER3
 
 ## API
 
+### Dane kondycji serwerów
 Endpoint: `api.aspx?group=NAZWA_GRUPY`
 
 Przykład: `api.aspx?group=DCI`
 
-Zwraca JSON:
-```json
-{
-  "LastUpdate": "2026-02-09 21:00:00",
-  "CollectionDuration": 12.5,
-  "TotalServers": 10,
-  "SuccessCount": 9,
-  "FailedCount": 1,
-  "Group": "DCI",
-  "Servers": [...]
-}
-```
+### Dane infrastruktury
+Endpoint: `api.aspx?type=infra&group=NAZWA`
+
+| Grupa | Endpoint |
+|-------|----------|
+| Klastry Windows | `api.aspx?type=infra&group=ClustersWindows` |
+| Udziały sieciowe | `api.aspx?type=infra&group=UdzialySieciowe` |
+| Instancje SQL | `api.aspx?type=infra&group=InstancjeSQL` |
+| Kolejki MQ | `api.aspx?type=infra&group=KolejkiMQ` |
 
 ## Konfiguracja DMZ
 
@@ -210,6 +246,8 @@ D:\PROD_REPO_DATA\IIS\prodHealtchCheck\ServerHealthMonitor.log
 
 ## Monitorowane dane
 
+### Kondycja serwerów
+
 | Kategoria | Dane |
 |-----------|------|
 | **CPU** | Użycie procesora (%) |
@@ -221,6 +259,15 @@ D:\PROD_REPO_DATA\IIS\prodHealtchCheck\ServerHealthMonitor.log
 | **Trellix** | Status usług antywirusowych Trellix |
 | **Firewall** | Status profili: Domain, Private, Public |
 | **IIS** | Application Pools i Sites (jeśli zainstalowany) |
+
+### Infrastruktura
+
+| Zakładka | Dane w tabeli/karcie |
+|----------|---------------------|
+| **Klastry Windows** | Karty klastrów z węzłami (nazwa, status, IP) i rolami (nazwa, status, IP) |
+| **Udziały sieciowe** | Tabela: Nazwa udziału, Ścieżka, Stan |
+| **Instancje SQL** | Karta serwera: Wersja SQL, Ilość baz · Tabela baz: Baza, Stan, Compat. Level |
+| **Kolejki MQ** | Tabela: QManager, Status, Port, Kolejka, Serwer |
 
 ## Zakładki
 
@@ -242,14 +289,50 @@ Monitoring stanu serwerów - dane zbierane przez skrypty PowerShell.
 
 ### Status infrastruktury
 
-Status usług i komponentów infrastruktury.
+Status usług i komponentów infrastruktury. Dane pobierane z konfiguracji `clusters.json`.
 
-| Zakładka | Opis |
-|----------|------|
-| Klastry Windows | Status klastrów Windows |
-| Udziały sieciowe | Lista udziałów FileShare |
-| Instancje SQL | Status baz danych SQL Server |
-| Kolejki MQ | Status kolejek IBM MQ |
+| Zakładka | Skrypt | Częstotliwość | Wyświetlane dane |
+|----------|--------|---------------|------------------|
+| Klastry Windows | `Collect-ClusterStatus.ps1` | Co 5 min | Węzły (nazwa, status, IP) + role (nazwa, status, IP) |
+| Udziały sieciowe | `Collect-InfraDaily.ps1` | Raz dziennie | Nazwa udziału, ścieżka, stan |
+| Instancje SQL | `Collect-InfraDaily.ps1` | Raz dziennie | Wersja SQL, ilość baz; per baza: nazwa, stan, compat. level |
+| Kolejki MQ | `Collect-InfraDaily.ps1` | Raz dziennie | QManager, status, port, kolejka, serwer |
+
+### Konfiguracja infrastruktury
+
+**clusters.json** (`D:\PROD_REPO_DATA\IIS\Cluster\clusters.json`):
+```json
+{
+    "clusters": [
+        {"cluster_type": "SQL", "servers": ["sqlcluster1.domain.pl"]},
+        {"cluster_type": "FileShare", "servers": ["fscluster1.domain.pl"]}
+    ]
+}
+```
+
+Serwery SQL z klastrów typu "SQL" są odpytywane o bazy danych (nazwa, stan, compatibility level).
+Serwery z klastrów typu "FileShare" są odpytywane o udziały SMB (nazwa, ścieżka, stan).
+
+**config_mq.json** (opcjonalny, `D:\PROD_REPO_DATA\IIS\prodHealtchCheck\config_mq.json`):
+```json
+{
+    "servers": [
+        {"name": "mqserver1", "description": "MQ Produkcja"},
+        {"name": "mqserver2", "description": "MQ Test"}
+    ]
+}
+```
+
+Serwery MQ są odpytywane o QManagery (status, port listenera) i kolejki lokalne (z pominięciem SYSTEM.*).
+
+## Wyszukiwanie
+
+Każda zakładka posiada pole wyszukiwania. Wyszukiwarka:
+- Filtruje widoczne karty/wiersze na podstawie wpisanego tekstu
+- **Podświetla** znaleziony tekst na żółto (`<mark>`) bezpośrednio w komórkach
+- Pasujące wiersze tabel dostają żółte tło
+- Pasujące karty serwerów dostają żółtą ramkę
+- Automatycznie rozwija zwinięte sekcje gdy znajdzie dopasowanie wewnątrz
 
 ## Auto-odświeżanie
 
