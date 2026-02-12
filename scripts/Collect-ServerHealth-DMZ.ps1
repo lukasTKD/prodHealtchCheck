@@ -1,6 +1,6 @@
 #Requires -Version 5.1
 param(
-    [int]$ThrottleLimit = 50
+    [int]$ThrottleLimit = 100  # OPTYMALIZACJA: Zwiększony limit dla dużych środowisk
 )
 
 $BasePath = "D:\PROD_REPO_DATA\IIS\prodHealtchCheck"
@@ -29,11 +29,17 @@ function Write-Log {
 }
 
 # ScriptBlock wykonywany ZDALNIE na serwerach DMZ
+# OPTYMALIZACJA: Użycie Get-CimInstance zamiast Get-WmiObject (szybsze, WS-Man)
 $ScriptBlock = {
+    $disks = Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" -EA SilentlyContinue
+    $cpu = Get-CimInstance Win32_Processor -EA SilentlyContinue
+    $os = Get-CimInstance Win32_OperatingSystem -EA SilentlyContinue
+    $procs = Get-CimInstance Win32_PerfFormattedData_PerfProc_Process -EA SilentlyContinue
+
     @{
         ServerName = $env:COMPUTERNAME
         CollectedAt = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-        Disks = @(Get-WmiObject Win32_LogicalDisk -Filter "DriveType=3" | ForEach-Object {
+        Disks = @($disks | ForEach-Object {
             @{
                 Drive = $_.DeviceID
                 TotalGB = [math]::Round($_.Size/1GB,1)
@@ -41,14 +47,13 @@ $ScriptBlock = {
                 PercentFree = [math]::Round(($_.FreeSpace/$_.Size)*100,0)
             }
         })
-        CPU = [math]::Round(((Get-WmiObject Win32_Processor).LoadPercentage | Measure-Object -Average).Average, 0)
+        CPU = [math]::Round(($cpu.LoadPercentage | Measure-Object -Average).Average, 0)
         RAM = $(
-            $os = Get-WmiObject Win32_OperatingSystem
             $total = [math]::Round($os.TotalVisibleMemorySize / 1MB, 1)
             $free = [math]::Round($os.FreePhysicalMemory / 1MB, 1)
             @{ TotalGB = $total; FreeGB = $free; UsedGB = [math]::Round($total - $free, 1); PercentUsed = [math]::Round((($total - $free) / $total) * 100, 0) }
         )
-        TopCPUServices = @(Get-WmiObject Win32_PerfFormattedData_PerfProc_Process |
+        TopCPUServices = @($procs |
             Where-Object { $_.Name -ne '_Total' -and $_.Name -ne 'Idle' } |
             Sort-Object PercentProcessorTime -Descending | Select-Object -First 3 | ForEach-Object {
             @{ Name = $_.Name; CPUPercent = $_.PercentProcessorTime }
@@ -112,7 +117,9 @@ if (-not $config.groups -or $config.groups.Count -eq 0) {
 Write-Log "START zbierania danych DMZ"
 
 $startTime = Get-Date
-$allResults = New-Object System.Collections.ArrayList
+# OPTYMALIZACJA: List[object] zamiast ArrayList, buforowanie logów
+$allResults = [System.Collections.Generic.List[object]]::new()
+$logBuffer = [System.Collections.Generic.List[string]]::new()
 $totalServers = 0
 $totalOk = 0
 $totalFail = 0
@@ -139,9 +146,9 @@ foreach ($group in $config.groups) {
         $secret = ConvertTo-SecureString -String $password
         $cred = New-Object -TypeName System.Management.Automation.PSCredential -ArgumentList $username, $secret
     } catch {
-        Write-Log "[$groupName] BLAD: Nie mozna odszyfrowac hasla"
+        $logBuffer.Add("[$groupName] BLAD: Nie mozna odszyfrowac hasla")
         foreach ($server in $servers) {
-            [void]$allResults.Add(@{
+            $allResults.Add(@{
                 ServerName = $server
                 DMZGroup = $groupName
                 CollectedAt = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
@@ -157,50 +164,64 @@ foreach ($group in $config.groups) {
         continue
     }
 
-    # Batch Invoke-Command dla calej grupy
-    $groupOk = @()
+    # OPTYMALIZACJA: Persistent PSSession dla całej grupy
+    $groupOk = [System.Collections.Generic.List[string]]::new()
+    $sessions = $null
 
-    $results = Invoke-Command -ComputerName $servers `
-        -UseSSL `
-        -Authentication Negotiate `
-        -SessionOption $sessionOption `
-        -Credential $cred `
-        -ScriptBlock $ScriptBlock `
-        -ThrottleLimit $ThrottleLimit `
-        -ErrorAction SilentlyContinue `
-        -ErrorVariable groupErrors
+    try {
+        # Utwórz sesje dla wszystkich serwerów w grupie
+        $sessions = New-PSSession -ComputerName $servers `
+            -UseSSL `
+            -Authentication Negotiate `
+            -SessionOption $sessionOption `
+            -Credential $cred `
+            -ThrottleLimit $ThrottleLimit `
+            -ErrorAction SilentlyContinue `
+            -ErrorVariable sessionErrors
 
-    foreach ($r in $results) {
-        if ($r.ServerName) {
-            $groupOk += $r.PSComputerName
-            [void]$allResults.Add(@{
-                ServerName = $r.ServerName
-                DMZGroup = $groupName
-                CollectedAt = $r.CollectedAt
-                CPU = $r.CPU
-                RAM = $r.RAM
-                Disks = @($r.Disks)
-                TopCPUServices = @($r.TopCPUServices)
-                TopRAMServices = @($r.TopRAMServices)
-                DServices = @($r.DServices)
-                TrellixStatus = @($r.TrellixStatus)
-                Firewall = $r.Firewall
-                IIS = $r.IIS
-                Error = $null
-            })
-            Write-Log "[$groupName] OK: $($r.ServerName)"
-            $totalOk++
+        if ($sessions) {
+            $results = Invoke-Command -Session $sessions `
+                -ScriptBlock $ScriptBlock `
+                -ErrorAction SilentlyContinue `
+                -ErrorVariable groupErrors
+
+            foreach ($r in $results) {
+                if ($r.ServerName) {
+                    $groupOk.Add($r.PSComputerName)
+                    $allResults.Add(@{
+                        ServerName = $r.ServerName
+                        DMZGroup = $groupName
+                        CollectedAt = $r.CollectedAt
+                        CPU = $r.CPU
+                        RAM = $r.RAM
+                        Disks = @($r.Disks)
+                        TopCPUServices = @($r.TopCPUServices)
+                        TopRAMServices = @($r.TopRAMServices)
+                        DServices = @($r.DServices)
+                        TrellixStatus = @($r.TrellixStatus)
+                        Firewall = $r.Firewall
+                        IIS = $r.IIS
+                        Error = $null
+                    })
+                    $logBuffer.Add("[$groupName] OK: $($r.ServerName)")
+                    $totalOk++
+                }
+            }
         }
+    }
+    finally {
+        # Zawsze zamknij sesje
+        if ($sessions) { Remove-PSSession $sessions -ErrorAction SilentlyContinue }
     }
 
     # Dodaj nieudane serwery
     foreach ($server in $servers) {
         if ($server -notin $groupOk) {
             $errMsg = "Timeout/Niedostepny"
-            $serverErr = $groupErrors | Where-Object { $_.TargetObject -eq $server } | Select-Object -First 1
+            $serverErr = $sessionErrors + $groupErrors | Where-Object { $_.TargetObject -eq $server } | Select-Object -First 1
             if ($serverErr) { $errMsg = $serverErr.Exception.Message }
 
-            [void]$allResults.Add(@{
+            $allResults.Add(@{
                 ServerName = $server
                 DMZGroup = $groupName
                 CollectedAt = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
@@ -210,7 +231,7 @@ foreach ($group in $config.groups) {
                 Firewall = @{ Domain = $false; Private = $false; Public = $false }
                 IIS = @{ Installed = $false }
             })
-            Write-Log "[$groupName] FAIL: $server"
+            $logBuffer.Add("[$groupName] FAIL: $server")
             $totalFail++
         }
     }
@@ -220,9 +241,9 @@ foreach ($group in $config.groups) {
 
 $duration = [math]::Round(((Get-Date) - $startTime).TotalSeconds, 1)
 
-# Sortuj wyniki
-$sortedList = New-Object System.Collections.ArrayList
-$allResults | Sort-Object { $_.DMZGroup }, { $_.ServerName } | ForEach-Object { [void]$sortedList.Add($_) }
+# Sortuj wyniki - OPTYMALIZACJA: List[object]
+$sortedList = [System.Collections.Generic.List[object]]::new()
+$allResults | Sort-Object { $_.DMZGroup }, { $_.ServerName } | ForEach-Object { $sortedList.Add($_) }
 
 # Zbuduj JSON
 $serversJson = ($sortedList | ForEach-Object { $_ | ConvertTo-Json -Depth 10 -Compress }) -join ","
@@ -239,4 +260,6 @@ if (-not (Test-Path $dataFolder)) {
 
 $json | Out-File $OutputPath -Encoding UTF8 -Force
 
-Write-Log "KONIEC: ${duration}s (OK: $totalOk, FAIL: $totalFail, TOTAL: $totalServers)"
+# OPTYMALIZACJA: Zapis wszystkich logów jednorazowo na końcu
+$logBuffer.Add("KONIEC: ${duration}s (OK: $totalOk, FAIL: $totalFail, TOTAL: $totalServers)")
+$logBuffer | ForEach-Object { Write-Log $_ }

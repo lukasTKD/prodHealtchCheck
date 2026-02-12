@@ -1,5 +1,5 @@
 #Requires -Version 5.1
-# Skrypt zbiorczy - uruchamia zbieranie danych dla wszystkich grup
+# Skrypt zbiorczy - uruchamia zbieranie danych dla wszystkich grup RÓWNOLEGLE
 
 $ScriptPath = $PSScriptRoot
 $BasePath = "D:\PROD_REPO_DATA\IIS\prodHealtchCheck"
@@ -24,18 +24,35 @@ function Write-Log {
     "$timestamp [ALL] $Message" | Out-File $LogPath -Append -Encoding UTF8
 }
 
-Write-Log "=== START zbierania dla wszystkich grup ==="
+Write-Log "=== START zbierania dla wszystkich grup (PARALLEL) ==="
+$startTime = Get-Date
 
-# Grupy LAN
+# OPTYMALIZACJA: Równoległe wykonanie wszystkich grup LAN + DMZ + Klastry
+$jobs = [System.Collections.Generic.List[object]]::new()
+
+# Uruchom wszystkie grupy LAN równolegle
 foreach ($Group in $Groups) {
-    Write-Log "Uruchamiam: $Group"
-    & "$ScriptPath\Collect-ServerHealth.ps1" -Group $Group
+    $jobs.Add((Start-Job -FilePath "$ScriptPath\Collect-ServerHealth.ps1" -ArgumentList $Group -Name "LAN_$Group"))
 }
 
-# Grupa DMZ
-Write-Log "Uruchamiam: DMZ"
-& "$ScriptPath\Collect-ServerHealth-DMZ.ps1"
+# Uruchom DMZ równolegle
+$jobs.Add((Start-Job -FilePath "$ScriptPath\Collect-ServerHealth-DMZ.ps1" -Name "DMZ"))
 
-Write-Log "=== KONIEC zbierania dla wszystkich grup ==="
+# Uruchom Klastry równolegle
+$jobs.Add((Start-Job -FilePath "$ScriptPath\Collect-ClusterStatus.ps1" -Name "Clusters"))
+
+# Czekaj na wszystkie zadania
+Write-Log "Uruchomiono $($jobs.Count) zadań równolegle, czekam na zakończenie..."
+$jobs | Wait-Job | Out-Null
+
+# Zbierz wyniki i zaloguj
+foreach ($job in $jobs) {
+    $status = if ($job.State -eq 'Completed') { "OK" } else { "FAIL ($($job.State))" }
+    Write-Log "Zakończono: $($job.Name) - $status"
+    Remove-Job $job -Force
+}
+
+$duration = [math]::Round(((Get-Date) - $startTime).TotalSeconds, 1)
+Write-Log "=== KONIEC zbierania dla wszystkich grup (${duration}s) ==="
 
 exit 0
