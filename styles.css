@@ -112,15 +112,13 @@ body {
 .tabs-wrapper {
     display: flex;
     align-items: stretch;
-    flex-wrap: nowrap;
 }
 .tabs-group {
     display: flex;
     flex-direction: column;
     align-items: center;
     gap: 8px;
-    flex: 0 1 auto;
-    min-width: 0;
+    flex: 1;
 }
 .tabs-label {
     font-weight: 600;
@@ -142,16 +140,15 @@ body {
     justify-content: center;
 }
 .tab {
-    padding: 8px 15px;
+    padding: 10px 20px;
     border: none;
     background: #f0f0f0;
     border-radius: 4px;
     cursor: pointer;
-    font-size: 13px;
+    font-size: 14px;
     font-weight: 500;
     color: #666;
     transition: all 0.2s;
-    white-space: nowrap;
 }
 .tab:hover {
     background: #e0e0e0;
