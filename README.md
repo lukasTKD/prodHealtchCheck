@@ -21,6 +21,17 @@ System monitorowania stanu serwerów Windows z interfejsem webowym.
 - **Instancje SQL** — wersja SQL Server, ilość baz; per baza: nazwa, stan, compatibility level
 - **Kolejki MQ** — QManager, status (Running/inne), port listenera, nazwy kolejek, serwer
 
+### Logi systemowe (Event Log)
+- Przeglądarka Windows Event Log z dowolnych serwerów
+- Formularz: nazwy serwerów, typ logów, okres czasowy
+- Zakładki per serwer z liczbą zdarzeń
+- Sortowanie po wszystkich kolumnach (data, typ, kod, źródło, opis)
+- Wyszukiwanie w logach z podświetlaniem i licznikiem wyników
+- Kolorowanie wierszy wg poziomu (Error/Warning/Information/Critical)
+- Konfiguracja typów logów z zewnętrznego pliku JSON
+- Zapis pobranych logów do pliku na serwerze
+- **Izolacja wielu użytkowników** — każda przeglądarka ma własny stan (dane, filtr, sortowanie)
+
 ### Ogólne
 - Wyszukiwarka z podświetlaniem wyników (działa we wszystkich zakładkach)
 - Auto-odświeżanie przy zmianie danych (sprawdzanie co 60s)
@@ -31,7 +42,7 @@ System monitorowania stanu serwerów Windows z interfejsem webowym.
 ```
 prodHealtchCheck/
 ├── index.html                 # Frontend - dashboard
-├── app.js                     # Logika JavaScript (serwery + infrastruktura)
+├── app.js                     # Logika JavaScript (serwery + infrastruktura + logi)
 ├── styles.css                 # Style CSS
 ├── api.aspx                   # Backend - API zwracające JSON
 ├── web.config                 # Konfiguracja IIS
@@ -46,7 +57,10 @@ prodHealtchCheck/
 │   ├── Collect-InfraDaily.ps1        # Dane infrastruktury (raz dziennie)
 │   ├── Collect-AllGroups.ps1         # Skrypt zbiorczy (LAN + DMZ + Klastry)
 │   ├── Encrypt-Password.ps1          # Szyfrowanie haseł dla DMZ
+│   ├── GetLogs.ps1                   # Pobieranie logów Windows Event Log
 │   └── Create-ServerListTemplates.ps1
+├── Config/
+│   └── logs.json                     # Lokalna kopia konfiguracji typów logów
 ├── README.md
 └── INSTRUKCJA_ZAKLADKI.md
 ```
@@ -75,6 +89,10 @@ D:\PROD_REPO_DATA\IIS\prodHealtchCheck\
 ├── serverList_Klastry.txt
 ├── serverList_DMZ.json                 # Konfiguracja DMZ (JSON z grupami)
 ├── config_mq.json                      # Konfiguracja kolejek MQ (opcjonalna)
+├── EventLogsConfig.json                # Konfiguracja typów logów Event Log
+├── EventLogs/                          # Zapisane logi Event Log
+│   ├── SERVER1_Application_20260212_120000.json
+│   └── SERVER2_System_20260212_120500.json
 └── ServerHealthMonitor.log             # Plik logu (rollowany co 48h)
 
 D:\PROD_REPO_DATA\IIS\Cluster\
@@ -171,6 +189,56 @@ Endpoint: `api.aspx?type=infra&group=NAZWA`
 | Udziały sieciowe | `api.aspx?type=infra&group=UdzialySieciowe` |
 | Instancje SQL | `api.aspx?type=infra&group=InstancjeSQL` |
 | Kolejki MQ | `api.aspx?type=infra&group=KolejkiMQ` |
+
+### Logi systemowe (Event Log)
+
+**Typy logów (konfiguracja):**
+
+Endpoint: `api.aspx?action=getLogTypes`
+
+Zwraca tablicę typów logów z pliku `D:\PROD_REPO_DATA\IIS\prodHealtchCheck\EventLogsConfig.json`.
+
+**Pobieranie logów:**
+
+Endpoint: `api.aspx?action=getLogs&servers=SERWER1,SERWER2&logType=TYP&period=OKRES`
+
+| Parametr | Wymagany | Wartości | Opis |
+|----------|----------|----------|------|
+| `servers` | Tak | Nazwy serwerów oddzielone przecinkami | np. `SERVER01,SERVER02` |
+| `logType` | Tak | Nazwa logu Windows | np. `Application`, `System`, `Security` |
+| `period` | Tak | `10min`, `30min`, `1h`, `2h`, `6h`, `12h`, `24h` | Okres wstecz |
+
+Przykład:
+```
+api.aspx?action=getLogs&servers=SERVER01,SERVER02&logType=Application&period=1h
+```
+
+Odpowiedź:
+```json
+{
+    "SERVER01": {
+        "success": true,
+        "logs": [
+            {
+                "TimeCreated": "2026-02-12T14:30:00",
+                "LevelDisplayName": "Error",
+                "Id": 1000,
+                "ProviderName": "Application Error",
+                "Message": "Faulting application..."
+            }
+        ]
+    },
+    "SERVER02": {
+        "success": false,
+        "error": "The RPC server is unavailable"
+    }
+}
+```
+
+Pobrane logi są automatycznie zapisywane do:
+```
+D:\PROD_REPO_DATA\IIS\prodHealtchCheck\EventLogs\SERWER_TypLogu_data.json
+```
 
 ## Konfiguracja DMZ
 
@@ -271,7 +339,7 @@ D:\PROD_REPO_DATA\IIS\prodHealtchCheck\ServerHealthMonitor.log
 
 ## Zakładki
 
-Interfejs podzielony jest na dwie grupy zakładek oddzielone pionową linią:
+Interfejs podzielony jest na trzy grupy zakładek oddzielone pionowymi liniami:
 
 ### Kondycja serwerów (CPU, RAM, dyski, usługi, IIS)
 
@@ -297,6 +365,14 @@ Status usług i komponentów infrastruktury. Dane pobierane z konfiguracji `clus
 | Udziały sieciowe | `Collect-InfraDaily.ps1` | Raz dziennie | Nazwa udziału, ścieżka, stan |
 | Instancje SQL | `Collect-InfraDaily.ps1` | Raz dziennie | Wersja SQL, ilość baz; per baza: nazwa, stan, compat. level |
 | Kolejki MQ | `Collect-InfraDaily.ps1` | Raz dziennie | QManager, status, port, kolejka, serwer |
+
+### Logi systemowe
+
+Przeglądarka Windows Event Log — dane pobierane na żądanie użytkownika z wybranych serwerów.
+
+| Zakładka | Endpointy | Dane | Wieloużytkownikowość |
+|----------|-----------|------|----------------------|
+| Event Log | `api.aspx?action=getLogs` | Windows Event Log z wybranych serwerów | Tak — każda przeglądarka ma izolowany stan |
 
 ### Konfiguracja infrastruktury
 
@@ -340,5 +416,6 @@ Strona automatycznie sprawdza co **60 sekund** czy dane zostały zaktualizowane:
 - Porównuje `LastUpdate` z obecnymi danymi
 - Jeśli data się zmieniła - automatycznie ładuje nowe dane
 - Bez przeładowania całej strony (tylko dane)
+- **Zakładka Event Log nie ma auto-odświeżania** — każdy użytkownik sam decyduje kiedy pobrać logi
 
 Dzięki temu po uruchomieniu skryptu `Collect-AllGroups.ps1` strona pokaże nowe dane w ciągu max 60 sekund.

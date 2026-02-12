@@ -40,22 +40,19 @@ $fileShareClusters = @($allClusters | Where-Object { $_.cluster_type -eq "FileSh
 
 Write-Log "=== START zbierania danych infrastruktury ==="
 $globalStart = Get-Date
-# OPTYMALIZACJA: Buforowanie logów
-$logBuffer = [System.Collections.Generic.List[string]]::new()
 
 # ===================================================================
 # REGION 1: UDZIAŁY SIECIOWE
 # ===================================================================
-$logBuffer.Add("--- Udzialy sieciowe ---")
+Write-Log "--- Udzialy sieciowe ---"
 $startShares = Get-Date
-# OPTYMALIZACJA: List[object] zamiast ArrayList
-$shareResults = [System.Collections.Generic.List[object]]::new()
+$shareResults = [System.Collections.ArrayList]::new()
 
 # Zbierz listę wszystkich file serwerów
-$fileServers = [System.Collections.Generic.List[string]]::new()
+$fileServers = [System.Collections.ArrayList]::new()
 foreach ($fsCluster in $fileShareClusters) {
     foreach ($srv in $fsCluster.servers) {
-        $fileServers.Add($srv)
+        [void]$fileServers.Add($srv)
     }
 }
 
@@ -82,13 +79,13 @@ if ($fileServers.Count -gt 0) {
 
     foreach ($r in $shareRaw) {
         if ($r.ServerName) {
-            $shareResults.Add(@{
+            [void]$shareResults.Add(@{
                 ServerName = $r.ServerName
                 ShareCount = $r.Shares.Count
                 Shares     = @($r.Shares)
                 Error      = $null
             })
-            $logBuffer.Add("OK Shares: $($r.ServerName) ($($r.Shares.Count) udzialow)")
+            Write-Log "OK Shares: $($r.ServerName) ($($r.Shares.Count) udzialow)"
         }
     }
 
@@ -98,17 +95,17 @@ if ($fileServers.Count -gt 0) {
         if ($srv -notin $okServers) {
             $errMsg = ($shareErrors | Where-Object { $_.TargetObject -eq $srv } |
                        Select-Object -First 1).Exception.Message
-            $shareResults.Add(@{
+            [void]$shareResults.Add(@{
                 ServerName = $srv
                 ShareCount = 0
                 Shares     = @()
                 Error      = if ($errMsg) { $errMsg } else { "Timeout/Niedostepny" }
             })
-            $logBuffer.Add("FAIL Shares: $srv")
+            Write-Log "FAIL Shares: $srv"
         }
     }
 } else {
-    $logBuffer.Add("INFO: Brak skonfigurowanych file serwerow")
+    Write-Log "INFO: Brak skonfigurowanych file serwerow"
 }
 
 $sharesDuration = [math]::Round(((Get-Date) - $startShares).TotalSeconds, 1)
@@ -118,21 +115,20 @@ $sharesDuration = [math]::Round(((Get-Date) - $startShares).TotalSeconds, 1)
     TotalServers       = $shareResults.Count
     FileServers        = @($shareResults)
 } | ConvertTo-Json -Depth 10 | Out-File "$BasePath\data\infra_UdzialySieciowe.json" -Encoding UTF8 -Force
-$logBuffer.Add("Udzialy zapisane (${sharesDuration}s)")
+Write-Log "Udzialy zapisane (${sharesDuration}s)"
 
 # ===================================================================
 # REGION 2: INSTANCJE SQL
 # ===================================================================
-$logBuffer.Add("--- Instancje SQL ---")
+Write-Log "--- Instancje SQL ---"
 $startSQL = Get-Date
-# OPTYMALIZACJA: List[object] zamiast ArrayList
-$sqlResults = [System.Collections.Generic.List[object]]::new()
+$sqlResults = [System.Collections.ArrayList]::new()
 
 # Zbierz listę serwerów SQL
-$sqlServers = [System.Collections.Generic.List[string]]::new()
+$sqlServers = [System.Collections.ArrayList]::new()
 foreach ($sqlCluster in $sqlClusters) {
     foreach ($srv in $sqlCluster.servers) {
-        $sqlServers.Add($srv)
+        [void]$sqlServers.Add($srv)
     }
 }
 
@@ -148,9 +144,10 @@ FROM sys.databases d
 ORDER BY d.name
 "@
 
-    # OPTYMALIZACJA: Runspace Pool zamiast Start-Job (znacznie szybsze)
-    $sqlScriptBlock = {
-        param($sqlSrv, $sqlQuery)
+    # OPTYMALIZACJA: Równoległe odpytywanie instancji SQL jeśli jest ich więcej niż 1
+    if ($sqlServers.Count -eq 1) {
+        # Pojedyncza instancja - wykonaj synchronicznie
+        $sqlSrv = $sqlServers[0]
         try {
             $rawDbs = @(Invoke-Sqlcmd -ServerInstance $sqlSrv -Query $sqlQuery -QueryTimeout 30 -ErrorAction Stop)
             $databases = @($rawDbs | ForEach-Object {
@@ -162,93 +159,85 @@ ORDER BY d.name
             })
             $sqlVersion = if ($rawDbs.Count -gt 0) { $rawDbs[0].SQLServerVersion } else { "N/A" }
             $edition    = if ($rawDbs.Count -gt 0) { $rawDbs[0].Edition } else { "N/A" }
-            @{
-                Success       = $true
+            [void]$sqlResults.Add(@{
                 ServerName    = $sqlSrv
                 SQLVersion    = $sqlVersion
                 Edition       = $edition
                 DatabaseCount = $databases.Count
                 Databases     = $databases
                 Error         = $null
-            }
+            })
+            Write-Log "OK SQL: $sqlSrv ($($databases.Count) baz)"
         }
         catch {
-            @{
-                Success       = $false
+            [void]$sqlResults.Add(@{
                 ServerName    = $sqlSrv
                 SQLVersion    = "N/A"
                 Edition       = "N/A"
                 DatabaseCount = 0
                 Databases     = @()
                 Error         = $_.Exception.Message
-            }
-        }
-    }
-
-    if ($sqlServers.Count -eq 1) {
-        # Pojedyncza instancja - wykonaj synchronicznie
-        $result = & $sqlScriptBlock -sqlSrv $sqlServers[0] -sqlQuery $sqlQuery
-        if ($result.Success) {
-            $logBuffer.Add("OK SQL: $($result.ServerName) ($($result.DatabaseCount) baz)")
-        } else {
-            $logBuffer.Add("FAIL SQL: $($result.ServerName) - $($result.Error)")
-        }
-        $sqlResults.Add($result)
-    } else {
-        # Wiele instancji - użyj Runspace Pool
-        $maxSqlThreads = [Math]::Min($sqlServers.Count, 10)
-        $sqlRunspacePool = [RunspaceFactory]::CreateRunspacePool(1, $maxSqlThreads)
-        $sqlRunspacePool.Open()
-
-        $sqlRunspaces = [System.Collections.Generic.List[object]]::new()
-
-        foreach ($sqlSrv in $sqlServers) {
-            $ps = [PowerShell]::Create()
-            $ps.AddScript($sqlScriptBlock).AddArgument($sqlSrv).AddArgument($sqlQuery) | Out-Null
-            $ps.RunspacePool = $sqlRunspacePool
-            $sqlRunspaces.Add(@{
-                PowerShell = $ps
-                Handle = $ps.BeginInvoke()
-                ServerName = $sqlSrv
             })
+            Write-Log "FAIL SQL: $sqlSrv - $($_.Exception.Message)"
         }
-
-        # Zbierz wyniki
-        foreach ($rs in $sqlRunspaces) {
+    } else {
+        # Wiele instancji - użyj Start-Job dla równoległości
+        $sqlJobs = @()
+        $sqlScriptBlock = {
+            param($sqlSrv, $sqlQuery)
             try {
-                $result = $rs.PowerShell.EndInvoke($rs.Handle)
-                if ($result -and $result.Count -gt 0) {
-                    $r = $result[0]
-                    if ($r.Success) {
-                        $logBuffer.Add("OK SQL: $($r.ServerName) ($($r.DatabaseCount) baz)")
-                    } else {
-                        $logBuffer.Add("FAIL SQL: $($r.ServerName) - $($r.Error)")
+                $rawDbs = @(Invoke-Sqlcmd -ServerInstance $sqlSrv -Query $sqlQuery -QueryTimeout 30 -ErrorAction Stop)
+                $databases = @($rawDbs | ForEach-Object {
+                    @{
+                        DatabaseName       = $_.DatabaseName
+                        State              = $_.State
+                        CompatibilityLevel = [int]$_.CompatibilityLevel
                     }
-                    $sqlResults.Add($r)
+                })
+                $sqlVersion = if ($rawDbs.Count -gt 0) { $rawDbs[0].SQLServerVersion } else { "N/A" }
+                $edition    = if ($rawDbs.Count -gt 0) { $rawDbs[0].Edition } else { "N/A" }
+                @{
+                    Success       = $true
+                    ServerName    = $sqlSrv
+                    SQLVersion    = $sqlVersion
+                    Edition       = $edition
+                    DatabaseCount = $databases.Count
+                    Databases     = $databases
+                    Error         = $null
                 }
             }
             catch {
-                $logBuffer.Add("FAIL SQL: $($rs.ServerName) - $($_.Exception.Message)")
-                $sqlResults.Add(@{
-                    Success = $false
-                    ServerName = $rs.ServerName
-                    SQLVersion = "N/A"
-                    Edition = "N/A"
+                @{
+                    Success       = $false
+                    ServerName    = $sqlSrv
+                    SQLVersion    = "N/A"
+                    Edition       = "N/A"
                     DatabaseCount = 0
-                    Databases = @()
-                    Error = $_.Exception.Message
-                })
-            }
-            finally {
-                $rs.PowerShell.Dispose()
+                    Databases     = @()
+                    Error         = $_.Exception.Message
+                }
             }
         }
 
-        $sqlRunspacePool.Close()
-        $sqlRunspacePool.Dispose()
+        foreach ($sqlSrv in $sqlServers) {
+            $sqlJobs += Start-Job -ScriptBlock $sqlScriptBlock -ArgumentList $sqlSrv, $sqlQuery
+        }
+
+        # Czekaj na zakończenie wszystkich zadań
+        $sqlJobs | Wait-Job | ForEach-Object {
+            $result = Receive-Job $_
+            Remove-Job $_
+            
+            if ($result.Success) {
+                Write-Log "OK SQL: $($result.ServerName) ($($result.DatabaseCount) baz)"
+            } else {
+                Write-Log "FAIL SQL: $($result.ServerName) - $($result.Error)"
+            }
+            [void]$sqlResults.Add($result)
+        }
     }
 } else {
-    $logBuffer.Add("INFO: Brak skonfigurowanych serwerow SQL")
+    Write-Log "INFO: Brak skonfigurowanych serwerow SQL"
 }
 
 $sqlDuration = [math]::Round(((Get-Date) - $startSQL).TotalSeconds, 1)
@@ -258,15 +247,14 @@ $sqlDuration = [math]::Round(((Get-Date) - $startSQL).TotalSeconds, 1)
     TotalInstances     = $sqlResults.Count
     Instances          = @($sqlResults)
 } | ConvertTo-Json -Depth 10 | Out-File "$BasePath\data\infra_InstancjeSQL.json" -Encoding UTF8 -Force
-$logBuffer.Add("SQL zapisane (${sqlDuration}s)")
+Write-Log "SQL zapisane (${sqlDuration}s)"
 
 # ===================================================================
 # REGION 3: KOLEJKI MQ
 # ===================================================================
-$logBuffer.Add("--- Kolejki MQ ---")
+Write-Log "--- Kolejki MQ ---"
 $startMQ = Get-Date
-# OPTYMALIZACJA: List[object] zamiast ArrayList
-$mqResults = [System.Collections.Generic.List[object]]::new()
+$mqResults = [System.Collections.ArrayList]::new()
 
 if (Test-Path $MQConfigPath) {
     $mqConfig = Get-Content $MQConfigPath -Raw | ConvertFrom-Json
@@ -348,14 +336,14 @@ if (Test-Path $MQConfigPath) {
         foreach ($r in $mqRaw) {
             if ($r.ServerName) {
                 $mqSrvConfig = $mqServers | Where-Object { $_.name -eq $r.PSComputerName } | Select-Object -First 1
-                $mqResults.Add(@{
+                [void]$mqResults.Add(@{
                     ServerName    = $r.ServerName
                     Description   = if ($mqSrvConfig) { $mqSrvConfig.description } else { "" }
                     MQInstalled   = $r.MQInstalled
                     QueueManagers = @($r.QueueManagers)
                     Error         = $null
                 })
-                $logBuffer.Add("OK MQ: $($r.ServerName)")
+                Write-Log "OK MQ: $($r.ServerName)"
             }
         }
 
@@ -364,19 +352,19 @@ if (Test-Path $MQConfigPath) {
         foreach ($srv in $mqServerNames) {
             if ($srv -notin $okMQ) {
                 $mqSrvConfig = $mqServers | Where-Object { $_.name -eq $srv } | Select-Object -First 1
-                $mqResults.Add(@{
+                [void]$mqResults.Add(@{
                     ServerName    = $srv
                     Description   = if ($mqSrvConfig) { $mqSrvConfig.description } else { "" }
                     MQInstalled   = $false
                     QueueManagers = @()
                     Error         = "Timeout/Niedostepny"
                 })
-                $logBuffer.Add("FAIL MQ: $srv")
+                Write-Log "FAIL MQ: $srv"
             }
         }
     }
 } else {
-    $logBuffer.Add("INFO: Brak konfiguracji MQ ($MQConfigPath) - pomijam")
+    Write-Log "INFO: Brak konfiguracji MQ ($MQConfigPath) - pomijam"
 }
 
 $mqDuration = [math]::Round(((Get-Date) - $startMQ).TotalSeconds, 1)
@@ -386,13 +374,10 @@ $mqDuration = [math]::Round(((Get-Date) - $startMQ).TotalSeconds, 1)
     TotalServers  = $mqResults.Count
     Servers       = @($mqResults)
 } | ConvertTo-Json -Depth 10 | Out-File "$BasePath\data\infra_KolejkiMQ.json" -Encoding UTF8 -Force
-$logBuffer.Add("MQ zapisane (${mqDuration}s)")
+Write-Log "MQ zapisane (${mqDuration}s)"
 
 # ===================================================================
 # PODSUMOWANIE
 # ===================================================================
 $globalDuration = [math]::Round(((Get-Date) - $globalStart).TotalSeconds, 1)
-$logBuffer.Add("=== KONIEC zbierania danych infrastruktury (${globalDuration}s) ===")
-
-# OPTYMALIZACJA: Zapis wszystkich logów jednorazowo na końcu
-$logBuffer | ForEach-Object { Write-Log $_ }
+Write-Log "=== KONIEC zbierania danych infrastruktury (${globalDuration}s) ==="

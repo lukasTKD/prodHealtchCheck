@@ -3,7 +3,7 @@ param(
     [Parameter(Mandatory=$true)]
     [ValidateSet("DCI", "Ferryt", "MarketPlanet", "MQ", "FileTransfer", "Klastry")]
     [string]$Group,
-    [int]$ThrottleLimit = 100  # OPTYMALIZACJA: Zwiększony limit dla dużych środowisk
+    [int]$ThrottleLimit = 50
 )
 
 $BasePath = "D:\PROD_REPO_DATA\IIS\prodHealtchCheck"
@@ -32,16 +32,10 @@ function Write-Log {
 }
 
 $ScriptBlock = {
-    # OPTYMALIZACJA: Użycie Get-CimInstance zamiast Get-WmiObject (szybsze, WS-Man)
-    $disks = Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" -EA SilentlyContinue
-    $cpu = Get-CimInstance Win32_Processor -EA SilentlyContinue
-    $os = Get-CimInstance Win32_OperatingSystem -EA SilentlyContinue
-    $procs = Get-CimInstance Win32_PerfFormattedData_PerfProc_Process -EA SilentlyContinue
-
     @{
         ServerName = $env:COMPUTERNAME
         CollectedAt = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-        Disks = @($disks | ForEach-Object {
+        Disks = @(Get-WmiObject Win32_LogicalDisk -Filter "DriveType=3" | ForEach-Object {
             @{
                 Drive = $_.DeviceID
                 TotalGB = [math]::Round($_.Size/1GB,1)
@@ -49,13 +43,14 @@ $ScriptBlock = {
                 PercentFree = [math]::Round(($_.FreeSpace/$_.Size)*100,0)
             }
         })
-        CPU = [math]::Round(($cpu.LoadPercentage | Measure-Object -Average).Average, 0)
+        CPU = [math]::Round(((Get-WmiObject Win32_Processor).LoadPercentage | Measure-Object -Average).Average, 0)
         RAM = $(
+            $os = Get-WmiObject Win32_OperatingSystem
             $total = [math]::Round($os.TotalVisibleMemorySize / 1MB, 1)
             $free = [math]::Round($os.FreePhysicalMemory / 1MB, 1)
             @{ TotalGB = $total; FreeGB = $free; UsedGB = [math]::Round($total - $free, 1); PercentUsed = [math]::Round((($total - $free) / $total) * 100, 0) }
         )
-        TopCPUServices = @($procs |
+        TopCPUServices = @(Get-WmiObject Win32_PerfFormattedData_PerfProc_Process |
             Where-Object { $_.Name -ne '_Total' -and $_.Name -ne 'Idle' } |
             Sort-Object PercentProcessorTime -Descending | Select-Object -First 3 | ForEach-Object {
             @{ Name = $_.Name; CPUPercent = $_.PercentProcessorTime }
@@ -122,15 +117,14 @@ $startTime = Get-Date
 # Wykonaj
 $results = Invoke-Command -ComputerName $servers -ScriptBlock $ScriptBlock -ThrottleLimit $ThrottleLimit -ErrorAction SilentlyContinue -ErrorVariable errs
 
-# Przetworzenie - OPTYMALIZACJA: List[object] zamiast ArrayList, buforowanie logów
-$allResults = [System.Collections.Generic.List[object]]::new()
-$ok = [System.Collections.Generic.List[string]]::new()
-$logBuffer = [System.Collections.Generic.List[string]]::new()
+# Przetworzenie
+$allResults = New-Object System.Collections.ArrayList
+$ok = @()
 
 foreach ($r in $results) {
     if ($r.ServerName) {
-        $ok.Add($r.ServerName)
-        $allResults.Add(@{
+        $ok += $r.ServerName
+        [void]$allResults.Add(@{
             ServerName = $r.ServerName
             CollectedAt = $r.CollectedAt
             CPU = $r.CPU
@@ -144,12 +138,12 @@ foreach ($r in $results) {
             IIS = $r.IIS
             Error = $null
         })
-        $logBuffer.Add("OK: $($r.ServerName)")
+        Write-Log "OK: $($r.ServerName)"
     }
 }
 
 foreach ($f in ($servers | Where-Object { $_ -notin $ok })) {
-    $allResults.Add(@{
+    [void]$allResults.Add(@{
         ServerName = $f
         CollectedAt = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
         Error = "Timeout/Niedostepny"
@@ -163,14 +157,14 @@ foreach ($f in ($servers | Where-Object { $_ -notin $ok })) {
         Firewall = @{ Domain = $false; Private = $false; Public = $false }
         IIS = @{ Installed = $false }
     })
-    $logBuffer.Add("FAIL: $f")
+    Write-Log "FAIL: $f"
 }
 
 $duration = [math]::Round(((Get-Date) - $startTime).TotalSeconds, 1)
 
-# Sortuj - OPTYMALIZACJA: List[object] zamiast ArrayList
-$sortedList = [System.Collections.Generic.List[object]]::new()
-$allResults | Sort-Object { $_.ServerName } | ForEach-Object { $sortedList.Add($_) }
+# Sortuj
+$sortedList = New-Object System.Collections.ArrayList
+$allResults | Sort-Object { $_.ServerName } | ForEach-Object { [void]$sortedList.Add($_) }
 
 # Zbuduj JSON
 $serversJson = ($sortedList | ForEach-Object { $_ | ConvertTo-Json -Depth 10 -Compress }) -join ","
@@ -181,6 +175,4 @@ $json = @"
 
 $json | Out-File $OutputPath -Encoding UTF8 -Force
 
-# OPTYMALIZACJA: Zapis wszystkich logów jednorazowo na końcu
-$logBuffer.Add("KONIEC: ${duration}s (OK: $($ok.Count), FAIL: $($servers.Count - $ok.Count))")
-$logBuffer | ForEach-Object { Write-Log $_ }
+Write-Log "KONIEC: ${duration}s (OK: $($ok.Count), FAIL: $($servers.Count - $ok.Count))"

@@ -1,0 +1,17 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(dir:*)",
+      "Bash(git add:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\ndodano informacje o IIS \\(AppPools, Sites\\) oraz SCCM Updates\n\n- sprawdzanie czy serwer ma IIS i wyswietlanie statusu pul aplikacyjnych i stron\n- opcjonalne pobieranie oczekujacych aktualizacji SCCM \\(enableSCCM = 0/1\\)\n- nowe sekcje w UI z odpowiednimi stylami\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git push)",
+      "Bash(powershell:*)",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\npoprawka wyswietlania IIS - uklad pionowy, pelna szerokosc\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(if not exist \"D:\\\\PROD_REPO_DATA\\\\IIS\\\\prodHealtchCheck\" mkdir \"D:\\\\PROD_REPO_DATA\\\\IIS\\\\prodHealtchCheck\")",
+      "Bash(git commit -m \"$\\(cat <<''EOF''\ndodano skrypt do szyfrowania hasel dla DMZ\n\nSkrypt Encrypt-Password.ps1 umozliwia bezpieczne szyfrowanie hasel\ndo uzycia w konfiguracji serverList_DMZ.json\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
+      "Bash(git commit:*)",
+      "Bash(git diff:*)",
+      "Bash(git checkout:*)"
+    ]
+  }
+}

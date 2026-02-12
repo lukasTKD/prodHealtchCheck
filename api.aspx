@@ -13,6 +13,140 @@
 
         string taskName = "Update II prodHealtchCheck";
 
+        // =====================================================================
+        // Endpoint: getLogTypes - zwraca konfigurację typów logów
+        // =====================================================================
+        if (action == "getLogTypes")
+        {
+            try
+            {
+                string configPath = @"D:\PROD_REPO_DATA\IIS\prodHealtchCheck\EventLogsConfig.json";
+                if (File.Exists(configPath))
+                {
+                    Response.Write(File.ReadAllText(configPath));
+                }
+                else
+                {
+                    Response.Write("[{\"name\":\"Application\",\"displayName\":\"Application\"},{\"name\":\"System\",\"displayName\":\"System\"}]");
+                }
+            }
+            catch (Exception ex)
+            {
+                Response.StatusCode = 500;
+                Response.Write("{\"error\":\"" + ex.Message.Replace("\"", "'") + "\"}");
+            }
+            return;
+        }
+
+        // =====================================================================
+        // Endpoint: getLogs - pobiera logi Windows Event Log z serwerów
+        // Każde żądanie jest niezależne (stateless) - wielu użytkowników
+        // może jednocześnie pobierać logi bez wzajemnych interferencji.
+        // =====================================================================
+        if (action == "getLogs")
+        {
+            string logServers = Request.QueryString["servers"];
+            string logType = Request.QueryString["logType"];
+            string periodStr = Request.QueryString["period"];
+
+            if (string.IsNullOrEmpty(logServers) || string.IsNullOrEmpty(logType) || string.IsNullOrEmpty(periodStr))
+            {
+                Response.StatusCode = 400;
+                Response.Write("{\"error\":\"Brak wymaganych parametrow: servers, logType, period\"}");
+                return;
+            }
+
+            int minutesBack = 60;
+            switch (periodStr.ToLower())
+            {
+                case "10min": minutesBack = 10; break;
+                case "30min": minutesBack = 30; break;
+                case "1h":   minutesBack = 60; break;
+                case "2h":   minutesBack = 120; break;
+                case "6h":   minutesBack = 360; break;
+                case "12h":  minutesBack = 720; break;
+                case "24h":  minutesBack = 1440; break;
+            }
+
+            string[] serverList = logServers.Split(new char[] { ',' }, StringSplitOptions.RemoveEmptyEntries);
+            string scriptPath = Server.MapPath("~/scripts/GetLogs.ps1");
+
+            System.Text.StringBuilder jsonBuilder = new System.Text.StringBuilder("{");
+            bool first = true;
+
+            foreach (string srv in serverList)
+            {
+                string srvName = srv.Trim();
+                if (string.IsNullOrEmpty(srvName)) continue;
+
+                // Walidacja nazwy serwera - tylko litery, cyfry, myślniki, podkreślenia, kropki
+                if (!Regex.IsMatch(srvName, @"^[a-zA-Z0-9\-_\.]+$"))
+                {
+                    continue;
+                }
+
+                if (!first) jsonBuilder.Append(",");
+                first = false;
+
+                // Escape nazwy serwera dla JSON
+                jsonBuilder.Append("\"" + srvName.Replace("\"", "\\\"") + "\":");
+
+                try
+                {
+                    // Escape logType dla PowerShell - zamień ' na ''
+                    string safeLogType = logType.Replace("'", "''");
+
+                    ProcessStartInfo logPsi = new ProcessStartInfo();
+                    logPsi.FileName = "powershell.exe";
+                    logPsi.Arguments = "-NoProfile -ExecutionPolicy Bypass -Command \"& '" + scriptPath + "' -ServerName '" + srvName + "' -LogName '" + safeLogType + "' -MinutesBack " + minutesBack + "\"";
+                    logPsi.UseShellExecute = false;
+                    logPsi.CreateNoWindow = true;
+                    logPsi.RedirectStandardOutput = true;
+                    logPsi.RedirectStandardError = true;
+
+                    Process logProcess = Process.Start(logPsi);
+                    string logOutput = logProcess.StandardOutput.ReadToEnd();
+                    string logError = logProcess.StandardError.ReadToEnd();
+                    logProcess.WaitForExit(120000); // 2 min timeout per server
+
+                    if (logProcess.ExitCode != 0 && !string.IsNullOrEmpty(logError))
+                    {
+                        string safeError = logError.Replace("\"", "'").Replace("\r\n", " ").Replace("\n", " ");
+                        if (safeError.Length > 500) safeError = safeError.Substring(0, 500);
+                        jsonBuilder.Append("{\"success\":false,\"error\":\"" + safeError + "\"}");
+                    }
+                    else
+                    {
+                        string logs = string.IsNullOrWhiteSpace(logOutput) ? "[]" : logOutput.Trim();
+                        jsonBuilder.Append("{\"success\":true,\"logs\":" + logs + "}");
+
+                        // Zapis logów do pliku
+                        try
+                        {
+                            string eventLogsDir = @"D:\PROD_REPO_DATA\IIS\prodHealtchCheck\EventLogs";
+                            if (!Directory.Exists(eventLogsDir))
+                            {
+                                Directory.CreateDirectory(eventLogsDir);
+                            }
+                            string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
+                            string fileName = srvName + "_" + logType.Replace("/", "_").Replace(" ", "_") + "_" + timestamp + ".json";
+                            string filePath = Path.Combine(eventLogsDir, fileName);
+                            File.WriteAllText(filePath, logs);
+                        }
+                        catch { /* Zapis opcjonalny - ignoruj bledy */ }
+                    }
+                }
+                catch (Exception ex)
+                {
+                    jsonBuilder.Append("{\"success\":false,\"error\":\"" + ex.Message.Replace("\"", "'") + "\"}");
+                }
+            }
+
+            jsonBuilder.Append("}");
+            Response.Write(jsonBuilder.ToString());
+            return;
+        }
+
         // Endpoint do sprawdzania statusu tasku
         if (action == "taskstatus")
         {

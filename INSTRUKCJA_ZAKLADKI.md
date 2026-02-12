@@ -200,6 +200,142 @@ Dodaj nowy obiekt w tablicy `groups`:
 }
 ```
 
+---
+
+# Dodawanie typów logów w zakładce Event Log
+
+Zakładka **Event Log** pozwala przeglądać Windows Event Log z dowolnych serwerów.
+Lista dostępnych typów logów (widoczna w menu "Typ logów") jest konfigurowana
+w zewnętrznym pliku JSON.
+
+## Plik konfiguracji
+
+```
+D:\PROD_REPO_DATA\IIS\prodHealtchCheck\EventLogsConfig.json
+```
+
+## Format pliku
+
+Plik zawiera tablicę JSON obiektów z dwoma polami:
+
+```json
+[
+    {
+        "name": "Application",
+        "displayName": "Application"
+    },
+    {
+        "name": "System",
+        "displayName": "System"
+    }
+]
+```
+
+| Pole | Opis |
+|------|------|
+| `name` | Techniczna nazwa logu Windows (przekazywana do `Get-WinEvent -LogName`) |
+| `displayName` | Nazwa wyświetlana w rozwijanej liście na stronie |
+
+## Jak dodać nowy typ logów
+
+### Krok 1: Sprawdź nazwę logu Windows
+
+Na docelowym serwerze uruchom PowerShell:
+```powershell
+# Wyświetl wszystkie dostępne logi:
+Get-WinEvent -ListLog * | Select-Object LogName | Sort-Object LogName
+
+# Szukaj konkretnego logu:
+Get-WinEvent -ListLog *IIS* | Select-Object LogName
+```
+
+Przykładowe nazwy logów:
+| Nazwa logu | Opis |
+|------------|------|
+| `Application` | Logi aplikacji |
+| `System` | Logi systemowe |
+| `Security` | Logi zabezpieczeń |
+| `Microsoft-Windows-IIS-Configuration/Operational` | Konfiguracja IIS |
+| `Microsoft-Windows-TerminalServices-LocalSessionManager/Operational` | Logowania RDP |
+| `Microsoft-Windows-Windows Defender/Operational` | Windows Defender |
+| `Microsoft-Windows-TaskScheduler/Operational` | Task Scheduler |
+| `Microsoft-Windows-PowerShell/Operational` | PowerShell |
+
+### Krok 2: Edytuj plik konfiguracji
+
+Otwórz plik:
+```
+D:\PROD_REPO_DATA\IIS\prodHealtchCheck\EventLogsConfig.json
+```
+
+Dodaj nowy obiekt na końcu tablicy (przed zamykającym `]`):
+```json
+[
+    {
+        "name": "Application",
+        "displayName": "Application"
+    },
+    {
+        "name": "System",
+        "displayName": "System"
+    },
+    {
+        "name": "Microsoft-Windows-IIS-Configuration/Operational",
+        "displayName": "IIS Configuration"
+    }
+]
+```
+
+> **UWAGA:** Upewnij się, że JSON jest poprawny — przecinki między obiektami, brak przecinka po ostatnim.
+
+### Krok 3: Odśwież stronę
+
+Odśwież stronę w przeglądarce (F5). Nowy typ logów pojawi się w liście rozwijanej "Typ logów".
+
+> Nie trzeba restartować IIS ani żadnej usługi — plik jest czytany przy każdym żądaniu.
+
+## Przykład: Dodanie logów RDP
+
+1. Sprawdź nazwę:
+   ```powershell
+   Get-WinEvent -ListLog *Terminal* | Select-Object LogName
+   ```
+   Wynik: `Microsoft-Windows-TerminalServices-LocalSessionManager/Operational`
+
+2. Edytuj `EventLogsConfig.json` — dodaj:
+   ```json
+   {
+       "name": "Microsoft-Windows-TerminalServices-LocalSessionManager/Operational",
+       "displayName": "Logowania RDP"
+   }
+   ```
+
+3. Odśwież stronę — "Logowania RDP" pojawi się w liście.
+
+## Zapis pobranych logów
+
+Pobrane logi są automatycznie zapisywane do:
+```
+D:\PROD_REPO_DATA\IIS\prodHealtchCheck\EventLogs\
+```
+
+Format nazwy pliku:
+```
+SERWER_TypLogu_RRRRMMDD_GGMMSS.json
+```
+
+Przykład: `SERVER01_Application_20260212_143000.json`
+
+> Zapis jest opcjonalny — błędy zapisu nie wpływają na wyświetlanie logów.
+
+## Wieloużytkownikowość
+
+Zakładka Event Log jest zaprojektowana dla wielu jednoczesnych użytkowników:
+- Każda przeglądarka ma własny, izolowany stan (dane, filtr, sortowanie, wybrany serwer)
+- Backend jest bezstanowy (stateless HTTP) — żądania nie wpływają na siebie
+- Brak współdzielonego cache'u ani sesji
+- Brak auto-odświeżania — każdy użytkownik sam decyduje kiedy pobrać logi
+
 ## Rozwiązywanie problemów DMZ
 
 ### Błąd: "Nie można odszyfrować hasła"

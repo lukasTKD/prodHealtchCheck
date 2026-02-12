@@ -1,0 +1,1188 @@
+D:\PROD_REPO\IIS\prodHealtchCheck\scripts\Collect-InfraDaily.ps1
+#Requires -Version 5.1
+# =============================================================================
+# Collect-InfraDaily.ps1
+# Zbiera dane infrastrukturalne: udziały sieciowe, instancje SQL, kolejki MQ
+# Uruchamiany raz dziennie (np. o 6:00)
+# =============================================================================
+
+$BasePath = "D:\PROD_REPO_DATA\IIS\prodHealtchCheck"
+$ClustersConfigPath = "D:\PROD_REPO_DATA\IIS\Cluster\clusters.json"
+$MQConfigPath = "$BasePath\config_mq.json"
+$LogPath = "$BasePath\ServerHealthMonitor.log"
+$LogMaxAgeHours = 48
+
+$ErrorActionPreference = "Continue"
+
+function Write-Log {
+    param([string]$Message)
+    if (Test-Path $LogPath) {
+        $logFile = Get-Item $LogPath
+        if ($logFile.LastWriteTime -lt (Get-Date).AddHours(-$LogMaxAgeHours)) {
+            $archiveName = "$BasePath\ServerHealthMonitor_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+            Move-Item $LogPath $archiveName -Force
+        }
+    }
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    "$timestamp [INFRA] $Message" | Out-File $LogPath -Append -Encoding UTF8
+}
+
+# --- Wczytaj konfigurację klastrów ---
+if (-not (Test-Path $ClustersConfigPath)) {
+    Write-Log "BLAD: Brak pliku konfiguracji: $ClustersConfigPath"
+    exit 1
+}
+
+$config = Get-Content $ClustersConfigPath -Raw | ConvertFrom-Json
+$allClusters = @($config.clusters)
+
+$sqlClusters = @($allClusters | Where-Object { $_.cluster_type -eq "SQL" })
+$fileShareClusters = @($allClusters | Where-Object { $_.cluster_type -eq "FileShare" })
+
+Write-Log "=== START zbierania danych infrastruktury ==="
+$globalStart = Get-Date
+# OPTYMALIZACJA: Buforowanie logów
+$logBuffer = [System.Collections.Generic.List[string]]::new()
+
+# ===================================================================
+# REGION 1: UDZIAŁY SIECIOWE
+# ===================================================================
+$logBuffer.Add("--- Udzialy sieciowe ---")
+$startShares = Get-Date
+# OPTYMALIZACJA: List[object] zamiast ArrayList
+$shareResults = [System.Collections.Generic.List[object]]::new()
+
+# Zbierz listę wszystkich file serwerów
+$fileServers = [System.Collections.Generic.List[string]]::new()
+foreach ($fsCluster in $fileShareClusters) {
+    foreach ($srv in $fsCluster.servers) {
+        $fileServers.Add($srv)
+    }
+}
+
+if ($fileServers.Count -gt 0) {
+    # Użyj Invoke-Command do równoległego zbierania udziałów
+    $shareScriptBlock = {
+        $shares = Get-SmbShare -ErrorAction SilentlyContinue |
+            Where-Object { $_.Path -and $_.ShareType -ne 'Special' }
+
+        @{
+            ServerName = $env:COMPUTERNAME
+            Shares = @($shares | ForEach-Object {
+                @{
+                    ShareName  = $_.Name
+                    SharePath  = $_.Path
+                    ShareState = $_.ShareState.ToString()
+                }
+            })
+        }
+    }
+
+    $shareRaw = Invoke-Command -ComputerName $fileServers -ScriptBlock $shareScriptBlock `
+        -ErrorAction SilentlyContinue -ErrorVariable shareErrors
+
+    foreach ($r in $shareRaw) {
+        if ($r.ServerName) {
+            $shareResults.Add(@{
+                ServerName = $r.ServerName
+                ShareCount = $r.Shares.Count
+                Shares     = @($r.Shares)
+                Error      = $null
+            })
+            $logBuffer.Add("OK Shares: $($r.ServerName) ($($r.Shares.Count) udzialow)")
+        }
+    }
+
+    # Serwery niedostępne
+    $okServers = @($shareRaw | ForEach-Object { $_.PSComputerName })
+    foreach ($srv in $fileServers) {
+        if ($srv -notin $okServers) {
+            $errMsg = ($shareErrors | Where-Object { $_.TargetObject -eq $srv } |
+                       Select-Object -First 1).Exception.Message
+            $shareResults.Add(@{
+                ServerName = $srv
+                ShareCount = 0
+                Shares     = @()
+                Error      = if ($errMsg) { $errMsg } else { "Timeout/Niedostepny" }
+            })
+            $logBuffer.Add("FAIL Shares: $srv")
+        }
+    }
+} else {
+    $logBuffer.Add("INFO: Brak skonfigurowanych file serwerow")
+}
+
+$sharesDuration = [math]::Round(((Get-Date) - $startShares).TotalSeconds, 1)
+@{
+    LastUpdate         = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    CollectionDuration = $sharesDuration
+    TotalServers       = $shareResults.Count
+    FileServers        = @($shareResults)
+} | ConvertTo-Json -Depth 10 | Out-File "$BasePath\data\infra_UdzialySieciowe.json" -Encoding UTF8 -Force
+$logBuffer.Add("Udzialy zapisane (${sharesDuration}s)")
+
+# ===================================================================
+# REGION 2: INSTANCJE SQL
+# ===================================================================
+$logBuffer.Add("--- Instancje SQL ---")
+$startSQL = Get-Date
+# OPTYMALIZACJA: List[object] zamiast ArrayList
+$sqlResults = [System.Collections.Generic.List[object]]::new()
+
+# Zbierz listę serwerów SQL
+$sqlServers = [System.Collections.Generic.List[string]]::new()
+foreach ($sqlCluster in $sqlClusters) {
+    foreach ($srv in $sqlCluster.servers) {
+        $sqlServers.Add($srv)
+    }
+}
+
+if ($sqlServers.Count -gt 0) {
+    $sqlQuery = @"
+SELECT
+    d.name AS DatabaseName,
+    d.state_desc AS State,
+    d.compatibility_level AS CompatibilityLevel,
+    CONVERT(VARCHAR(20), SERVERPROPERTY('ProductVersion')) AS SQLServerVersion,
+    CONVERT(VARCHAR(100), SERVERPROPERTY('Edition')) AS Edition
+FROM sys.databases d
+ORDER BY d.name
+"@
+
+    # OPTYMALIZACJA: Runspace Pool zamiast Start-Job (znacznie szybsze)
+    $sqlScriptBlock = {
+        param($sqlSrv, $sqlQuery)
+        try {
+            $rawDbs = @(Invoke-Sqlcmd -ServerInstance $sqlSrv -Query $sqlQuery -QueryTimeout 30 -ErrorAction Stop)
+            $databases = @($rawDbs | ForEach-Object {
+                @{
+                    DatabaseName       = $_.DatabaseName
+                    State              = $_.State
+                    CompatibilityLevel = [int]$_.CompatibilityLevel
+                }
+            })
+            $sqlVersion = if ($rawDbs.Count -gt 0) { $rawDbs[0].SQLServerVersion } else { "N/A" }
+            $edition    = if ($rawDbs.Count -gt 0) { $rawDbs[0].Edition } else { "N/A" }
+            @{
+                Success       = $true
+                ServerName    = $sqlSrv
+                SQLVersion    = $sqlVersion
+                Edition       = $edition
+                DatabaseCount = $databases.Count
+                Databases     = $databases
+                Error         = $null
+            }
+        }
+        catch {
+            @{
+                Success       = $false
+                ServerName    = $sqlSrv
+                SQLVersion    = "N/A"
+                Edition       = "N/A"
+                DatabaseCount = 0
+                Databases     = @()
+                Error         = $_.Exception.Message
+            }
+        }
+    }
+
+    if ($sqlServers.Count -eq 1) {
+        # Pojedyncza instancja - wykonaj synchronicznie
+        $result = & $sqlScriptBlock -sqlSrv $sqlServers[0] -sqlQuery $sqlQuery
+        if ($result.Success) {
+            $logBuffer.Add("OK SQL: $($result.ServerName) ($($result.DatabaseCount) baz)")
+        } else {
+            $logBuffer.Add("FAIL SQL: $($result.ServerName) - $($result.Error)")
+        }
+        $sqlResults.Add($result)
+    } else {
+        # Wiele instancji - użyj Runspace Pool
+        $maxSqlThreads = [Math]::Min($sqlServers.Count, 10)
+        $sqlRunspacePool = [RunspaceFactory]::CreateRunspacePool(1, $maxSqlThreads)
+        $sqlRunspacePool.Open()
+
+        $sqlRunspaces = [System.Collections.Generic.List[object]]::new()
+
+        foreach ($sqlSrv in $sqlServers) {
+            $ps = [PowerShell]::Create()
+            $ps.AddScript($sqlScriptBlock).AddArgument($sqlSrv).AddArgument($sqlQuery) | Out-Null
+            $ps.RunspacePool = $sqlRunspacePool
+            $sqlRunspaces.Add(@{
+                PowerShell = $ps
+                Handle = $ps.BeginInvoke()
+                ServerName = $sqlSrv
+            })
+        }
+
+        # Zbierz wyniki
+        foreach ($rs in $sqlRunspaces) {
+            try {
+                $result = $rs.PowerShell.EndInvoke($rs.Handle)
+                if ($result -and $result.Count -gt 0) {
+                    $r = $result[0]
+                    if ($r.Success) {
+                        $logBuffer.Add("OK SQL: $($r.ServerName) ($($r.DatabaseCount) baz)")
+                    } else {
+                        $logBuffer.Add("FAIL SQL: $($r.ServerName) - $($r.Error)")
+                    }
+                    $sqlResults.Add($r)
+                }
+            }
+            catch {
+                $logBuffer.Add("FAIL SQL: $($rs.ServerName) - $($_.Exception.Message)")
+                $sqlResults.Add(@{
+                    Success = $false
+                    ServerName = $rs.ServerName
+                    SQLVersion = "N/A"
+                    Edition = "N/A"
+                    DatabaseCount = 0
+                    Databases = @()
+                    Error = $_.Exception.Message
+                })
+            }
+            finally {
+                $rs.PowerShell.Dispose()
+            }
+        }
+
+        $sqlRunspacePool.Close()
+        $sqlRunspacePool.Dispose()
+    }
+} else {
+    $logBuffer.Add("INFO: Brak skonfigurowanych serwerow SQL")
+}
+
+$sqlDuration = [math]::Round(((Get-Date) - $startSQL).TotalSeconds, 1)
+@{
+    LastUpdate         = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    CollectionDuration = $sqlDuration
+    TotalInstances     = $sqlResults.Count
+    Instances          = @($sqlResults)
+} | ConvertTo-Json -Depth 10 | Out-File "$BasePath\data\infra_InstancjeSQL.json" -Encoding UTF8 -Force
+$logBuffer.Add("SQL zapisane (${sqlDuration}s)")
+
+# ===================================================================
+# REGION 3: KOLEJKI MQ
+# ===================================================================
+$logBuffer.Add("--- Kolejki MQ ---")
+$startMQ = Get-Date
+# OPTYMALIZACJA: List[object] zamiast ArrayList
+$mqResults = [System.Collections.Generic.List[object]]::new()
+
+if (Test-Path $MQConfigPath) {
+    $mqConfig = Get-Content $MQConfigPath -Raw | ConvertFrom-Json
+    $mqServers = @($mqConfig.servers)
+
+    if ($mqServers.Count -gt 0) {
+        # ScriptBlock do zdalnego odpytania MQ
+        $mqScriptBlock = {
+            $qmgrResults = @()
+            $dspmqPath = "C:\Program Files\IBM\MQ\bin\dspmq.exe"
+
+            if (Test-Path $dspmqPath) {
+                $qmgrs = & $dspmqPath 2>$null
+                foreach ($line in $qmgrs) {
+                    if ($line -match 'QMNAME\((.*?)\)\s+STATUS\((.*?)\)') {
+                        $qmgrName = $Matches[1]
+                        $qmgrStatus = $Matches[2]
+
+                        $queues = @()
+                        $qmgrPort = ''
+                        if ($qmgrStatus -eq 'Running') {
+                            # Pobierz port listenera
+                            try {
+                                $lsnrCmd = "DISPLAY LISTENER(*) PORT`nEND"
+                                $lsnrOutput = echo $lsnrCmd | & "C:\Program Files\IBM\MQ\binunmqsc.exe" $qmgrName 2>$null
+                                foreach ($lline in $lsnrOutput) {
+                                    if ($lline -match 'PORT\((\d+)\)') {
+                                        $qmgrPort = $Matches[1]
+                                        break
+                                    }
+                                }
+                            } catch {}
+
+                            try {
+                                $cmd = "DISPLAY QLOCAL(*) CURDEPTH MAXDEPTH`nEND"
+                                $queueOutput = echo $cmd | & "C:\Program Files\IBM\MQ\binunmqsc.exe" $qmgrName 2>$null
+
+                                $currentQueue = $null
+                                foreach ($qline in $queueOutput) {
+                                    if ($qline -match 'QUEUE\((.*?)\)') {
+                                        if ($currentQueue) { $queues += $currentQueue }
+                                        $currentQueue = @{ QueueName = $Matches[1]; CurrentDepth = 0; MaxDepth = 0 }
+                                    }
+                                    if ($qline -match 'CURDEPTH\((\d+)\)' -and $currentQueue) {
+                                        $currentQueue.CurrentDepth = [int]$Matches[1]
+                                    }
+                                    if ($qline -match 'MAXDEPTH\((\d+)\)' -and $currentQueue) {
+                                        $currentQueue.MaxDepth = [int]$Matches[1]
+                                    }
+                                }
+                                if ($currentQueue) { $queues += $currentQueue }
+                                # Filtruj kolejki systemowe SYSTEM.*
+                                $queues = @($queues | Where-Object { $_.QueueName -notmatch '^SYSTEM\.' })
+                            } catch {}
+                        }
+
+                        $qmgrResults += @{
+                            QueueManager = $qmgrName
+                            Status       = $qmgrStatus
+                            Port         = $qmgrPort
+                            QueueCount   = $queues.Count
+                            Queues       = $queues
+                        }
+                    }
+                }
+            }
+
+            @{
+                ServerName    = $env:COMPUTERNAME
+                MQInstalled   = (Test-Path $dspmqPath)
+                QueueManagers = $qmgrResults
+            }
+        }
+
+        $mqServerNames = @($mqServers | ForEach-Object { $_.name })
+        $mqRaw = Invoke-Command -ComputerName $mqServerNames -ScriptBlock $mqScriptBlock `
+            -ErrorAction SilentlyContinue -ErrorVariable mqErrors
+
+        foreach ($r in $mqRaw) {
+            if ($r.ServerName) {
+                $mqSrvConfig = $mqServers | Where-Object { $_.name -eq $r.PSComputerName } | Select-Object -First 1
+                $mqResults.Add(@{
+                    ServerName    = $r.ServerName
+                    Description   = if ($mqSrvConfig) { $mqSrvConfig.description } else { "" }
+                    MQInstalled   = $r.MQInstalled
+                    QueueManagers = @($r.QueueManagers)
+                    Error         = $null
+                })
+                $logBuffer.Add("OK MQ: $($r.ServerName)")
+            }
+        }
+
+        # Serwery niedostępne
+        $okMQ = @($mqRaw | ForEach-Object { $_.PSComputerName })
+        foreach ($srv in $mqServerNames) {
+            if ($srv -notin $okMQ) {
+                $mqSrvConfig = $mqServers | Where-Object { $_.name -eq $srv } | Select-Object -First 1
+                $mqResults.Add(@{
+                    ServerName    = $srv
+                    Description   = if ($mqSrvConfig) { $mqSrvConfig.description } else { "" }
+                    MQInstalled   = $false
+                    QueueManagers = @()
+                    Error         = "Timeout/Niedostepny"
+                })
+                $logBuffer.Add("FAIL MQ: $srv")
+            }
+        }
+    }
+} else {
+    $logBuffer.Add("INFO: Brak konfiguracji MQ ($MQConfigPath) - pomijam")
+}
+
+$mqDuration = [math]::Round(((Get-Date) - $startMQ).TotalSeconds, 1)
+@{
+    LastUpdate    = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    CollectionDuration = $mqDuration
+    TotalServers  = $mqResults.Count
+    Servers       = @($mqResults)
+} | ConvertTo-Json -Depth 10 | Out-File "$BasePath\data\infra_KolejkiMQ.json" -Encoding UTF8 -Force
+$logBuffer.Add("MQ zapisane (${mqDuration}s)")
+
+# ===================================================================
+# PODSUMOWANIE
+# ===================================================================
+$globalDuration = [math]::Round(((Get-Date) - $globalStart).TotalSeconds, 1)
+$logBuffer.Add("=== KONIEC zbierania danych infrastruktury (${globalDuration}s) ===")
+
+# OPTYMALIZACJA: Zapis wszystkich logów jednorazowo na końcu
+$logBuffer | ForEach-Object { Write-Log $_ }
+D:\PROD_REPO\IIS\prodHealtchCheck\scripts\Collect-ClusterStatus.ps1
+#Requires -Version 5.1
+# =============================================================================
+# Collect-ClusterStatus.ps1
+# Zbiera status klastrów Windows i zapisuje do JSON
+# Uruchamiany co 5 minut (razem z Collect-AllGroups.ps1)
+# =============================================================================
+
+$BasePath = "D:\PROD_REPO_DATA\IIS\prodHealtchCheck"
+$ClustersConfigPath = "D:\PROD_REPO_DATA\IIS\Cluster\clusters.json"
+$OutputPath = "$BasePath\data\infra_ClustersWindows.json"
+$LogPath = "$BasePath\ServerHealthMonitor.log"
+$LogMaxAgeHours = 48
+
+$ErrorActionPreference = "Continue"
+
+function Write-Log {
+    param([string]$Message)
+    if (Test-Path $LogPath) {
+        $logFile = Get-Item $LogPath
+        if ($logFile.LastWriteTime -lt (Get-Date).AddHours(-$LogMaxAgeHours)) {
+            $archiveName = "$BasePath\ServerHealthMonitor_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+            Move-Item $LogPath $archiveName -Force
+        }
+    }
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    "$timestamp [CLUSTERS] $Message" | Out-File $LogPath -Append -Encoding UTF8
+}
+
+# --- Wczytaj konfigurację klastrów ---
+if (-not (Test-Path $ClustersConfigPath)) {
+    Write-Log "BLAD: Brak pliku konfiguracji: $ClustersConfigPath"
+    exit 1
+}
+
+$config = Get-Content $ClustersConfigPath -Raw | ConvertFrom-Json
+$allClusters = @($config.clusters)
+
+if ($allClusters.Count -eq 0) {
+    Write-Log "BLAD: Brak klastrow w konfiguracji"
+    exit 1
+}
+
+# Zbierz wszystkie nazwy FQDN klastrów do jednej listy
+# OPTYMALIZACJA: List[object] zamiast ArrayList
+$clusterList = [System.Collections.Generic.List[object]]::new()
+foreach ($cg in $allClusters) {
+    foreach ($srv in $cg.servers) {
+        $clusterList.Add(@{ FQDN = $srv; Type = $cg.cluster_type })
+    }
+}
+
+Write-Log "START zbierania statusu klastrow ($($clusterList.Count) klastrow)"
+$startTime = Get-Date
+$clusterResults = [System.Collections.Generic.List[object]]::new()
+$logBuffer = [System.Collections.Generic.List[string]]::new()
+
+# --- Zbieranie danych z klastrów ---
+# OPTYMALIZACJA: Używamy runspace pool dla równoległego przetwarzania klastrów
+$maxThreads = [Math]::Min($clusterList.Count, 10)  # Max 10 równoległych połączeń
+
+$scriptBlock = {
+    param($clusterFQDN, $clusterType)
+    
+    try {
+        # Pobierz nazwę klastra
+        $clusterObj = Get-Cluster -Name $clusterFQDN -ErrorAction Stop
+        $clusterName = $clusterObj.Name
+
+        # Pobierz węzły - jedno zapytanie
+        $rawNodes = @(Get-ClusterNode -Cluster $clusterFQDN -ErrorAction Stop)
+
+        # Pobierz interfejsy sieciowe - jedno zapytanie dla wszystkich węzłów
+        $allInterfaces = @()
+        try {
+            $allInterfaces = @(Get-ClusterNetworkInterface -Cluster $clusterFQDN -ErrorAction SilentlyContinue)
+        } catch {}
+
+        # Buduj listę węzłów z adresami IP (lokalne przetwarzanie bez RPC)
+        $nodes = @($rawNodes | ForEach-Object {
+            $nodeName = $_.Name
+            $nodeIPs = ($allInterfaces | Where-Object { $_.Node -eq $nodeName } |
+                        ForEach-Object { $_.Address }) -join ", "
+            @{
+                Name        = $nodeName
+                State       = $_.State.ToString()
+                NodeWeight  = $_.NodeWeight
+                DynamicWeight = $_.DynamicWeight
+                IPAddresses = if ($nodeIPs) { $nodeIPs } else { "N/A" }
+            }
+        })
+
+        # Pobierz role i zasoby - dwa zapytania zamiast N
+        $rawRoles = @(Get-ClusterGroup -Cluster $clusterFQDN -ErrorAction Stop)
+        $allResources = @()
+        try {
+            $allResources = @(Get-ClusterResource -Cluster $clusterFQDN -ErrorAction SilentlyContinue)
+        } catch {}
+
+        # OPTYMALIZACJA: Batch pobieranie parametrów IP - filtruj tylko IP Address resources
+        $ipResources = @($allResources | Where-Object { $_.ResourceType -eq "IP Address" })
+        $ipParams = @{}
+        
+        # Użyj pipeline zamiast foreach dla lepszej wydajności
+        $ipResources | ForEach-Object {
+            try {
+                $addr = (Get-ClusterParameter -InputObject $_ -Name Address -ErrorAction SilentlyContinue).Value
+                if ($addr) {
+                    $ownerGroup = $_.OwnerGroup.ToString()
+                    if ($ipParams.ContainsKey($ownerGroup)) {
+                        $ipParams[$ownerGroup] += ", $addr"
+                    } else {
+                        $ipParams[$ownerGroup] = $addr
+                    }
+                }
+            } catch {}
+        }
+
+        $roles = @($rawRoles | ForEach-Object {
+            $roleName = $_.Name
+            @{
+                Name        = $roleName
+                State       = $_.State.ToString()
+                OwnerNode   = $_.OwnerNode.ToString()
+                IPAddresses = if ($ipParams.ContainsKey($roleName)) { $ipParams[$roleName] } else { "" }
+            }
+        })
+
+        @{
+            Success     = $true
+            ClusterName = $clusterName
+            FQDN        = $clusterFQDN
+            ClusterType = $clusterType
+            Status      = "Online"
+            Nodes       = $nodes
+            Roles       = $roles
+            Error       = $null
+        }
+    }
+    catch {
+        @{
+            Success     = $false
+            ClusterName = $clusterFQDN -replace '\..*$', ''
+            FQDN        = $clusterFQDN
+            ClusterType = $clusterType
+            Status      = "Error"
+            Nodes       = @()
+            Roles       = @()
+            Error       = $_.Exception.Message
+        }
+    }
+}
+
+# OPTYMALIZACJA: Runspace Pool zamiast Start-Job (znacznie szybsze)
+if ($clusterList.Count -eq 1) {
+    # Jeden klaster - wykonaj synchronicznie
+    $result = & $scriptBlock -clusterFQDN $clusterList[0].FQDN -clusterType $clusterList[0].Type
+    if ($result.Success) {
+        $logBuffer.Add("OK: $($result.ClusterName) ($($result.ClusterType)) - $($result.Nodes.Count) wezlow, $($result.Roles.Count) rol")
+    } else {
+        $logBuffer.Add("FAIL: $($result.FQDN) - $($result.Error)")
+    }
+    $clusterResults.Add($result)
+} else {
+    # Wiele klastrów - użyj Runspace Pool dla równoległości
+    $runspacePool = [RunspaceFactory]::CreateRunspacePool(1, $maxThreads)
+    $runspacePool.Open()
+
+    $runspaces = [System.Collections.Generic.List[object]]::new()
+
+    foreach ($cluster in $clusterList) {
+        $ps = [PowerShell]::Create()
+        $ps.AddScript($scriptBlock).AddArgument($cluster.FQDN).AddArgument($cluster.Type) | Out-Null
+        $ps.RunspacePool = $runspacePool
+        $runspaces.Add(@{
+            PowerShell = $ps
+            Handle = $ps.BeginInvoke()
+            FQDN = $cluster.FQDN
+        })
+    }
+
+    # Zbierz wyniki
+    foreach ($rs in $runspaces) {
+        try {
+            $result = $rs.PowerShell.EndInvoke($rs.Handle)
+            if ($result -and $result.Count -gt 0) {
+                $r = $result[0]
+                if ($r.Success) {
+                    $logBuffer.Add("OK: $($r.ClusterName) ($($r.ClusterType)) - $($r.Nodes.Count) wezlow, $($r.Roles.Count) rol")
+                } else {
+                    $logBuffer.Add("FAIL: $($r.FQDN) - $($r.Error)")
+                }
+                $clusterResults.Add($r)
+            }
+        }
+        catch {
+            $logBuffer.Add("FAIL: $($rs.FQDN) - $($_.Exception.Message)")
+            $clusterResults.Add(@{
+                Success = $false
+                ClusterName = $rs.FQDN -replace '\..*$', ''
+                FQDN = $rs.FQDN
+                ClusterType = "Unknown"
+                Status = "Error"
+                Nodes = @()
+                Roles = @()
+                Error = $_.Exception.Message
+            })
+        }
+        finally {
+            $rs.PowerShell.Dispose()
+        }
+    }
+
+    $runspacePool.Close()
+    $runspacePool.Dispose()
+}
+
+# --- Zapisz wynik ---
+$duration = [math]::Round(((Get-Date) - $startTime).TotalSeconds, 1)
+$onlineCount = @($clusterResults | Where-Object { $_.Status -eq "Online" }).Count
+
+$output = @{
+    LastUpdate         = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+    CollectionDuration = $duration
+    TotalClusters      = $clusterResults.Count
+    OnlineCount        = $onlineCount
+    FailedCount        = $clusterResults.Count - $onlineCount
+    Clusters           = @($clusterResults)
+}
+
+$output | ConvertTo-Json -Depth 10 | Out-File $OutputPath -Encoding UTF8 -Force
+
+# OPTYMALIZACJA: Zapis wszystkich logów jednorazowo na końcu
+$logBuffer.Add("KONIEC: ${duration}s (OK: $onlineCount, FAIL: $($clusterResults.Count - $onlineCount))")
+$logBuffer | ForEach-Object { Write-Log $_ }
+D:\PROD_REPO\IIS\prodHealtchCheck\scripts\Collect-ServerHealth-DMZ.ps1
+#Requires -Version 5.1
+param(
+    [int]$ThrottleLimit = 100  # OPTYMALIZACJA: Zwiększony limit dla dużych środowisk
+)
+
+$BasePath = "D:\PROD_REPO_DATA\IIS\prodHealtchCheck"
+$ConfigPath = "$BasePath\serverList_DMZ.json"
+$OutputPath = "$BasePath\data\serverHealth_DMZ.json"
+$LogPath = "$BasePath\ServerHealthMonitor.log"
+$LogMaxAgeHours = 48
+
+$ErrorActionPreference = "Continue"
+
+# Funkcja logowania z rollowaniem
+function Write-Log {
+    param([string]$Message)
+
+    # Rollowanie logu co 48h
+    if (Test-Path $LogPath) {
+        $logFile = Get-Item $LogPath
+        if ($logFile.LastWriteTime -lt (Get-Date).AddHours(-$LogMaxAgeHours)) {
+            $archiveName = "$BasePath\ServerHealthMonitor_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+            Move-Item $LogPath $archiveName -Force
+        }
+    }
+
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    "$timestamp [DMZ] $Message" | Out-File $LogPath -Append -Encoding UTF8
+}
+
+# ScriptBlock wykonywany ZDALNIE na serwerach DMZ
+# OPTYMALIZACJA: Użycie Get-CimInstance zamiast Get-WmiObject (szybsze, WS-Man)
+$ScriptBlock = {
+    $disks = Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" -EA SilentlyContinue
+    $cpu = Get-CimInstance Win32_Processor -EA SilentlyContinue
+    $os = Get-CimInstance Win32_OperatingSystem -EA SilentlyContinue
+    $procs = Get-CimInstance Win32_PerfFormattedData_PerfProc_Process -EA SilentlyContinue
+
+    @{
+        ServerName = $env:COMPUTERNAME
+        CollectedAt = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+        Disks = @($disks | ForEach-Object {
+            @{
+                Drive = $_.DeviceID
+                TotalGB = [math]::Round($_.Size/1GB,1)
+                FreeGB = [math]::Round($_.FreeSpace/1GB,1)
+                PercentFree = [math]::Round(($_.FreeSpace/$_.Size)*100,0)
+            }
+        })
+        CPU = [math]::Round(($cpu.LoadPercentage | Measure-Object -Average).Average, 0)
+        RAM = $(
+            $total = [math]::Round($os.TotalVisibleMemorySize / 1MB, 1)
+            $free = [math]::Round($os.FreePhysicalMemory / 1MB, 1)
+            @{ TotalGB = $total; FreeGB = $free; UsedGB = [math]::Round($total - $free, 1); PercentUsed = [math]::Round((($total - $free) / $total) * 100, 0) }
+        )
+        TopCPUServices = @($procs |
+            Where-Object { $_.Name -ne '_Total' -and $_.Name -ne 'Idle' } |
+            Sort-Object PercentProcessorTime -Descending | Select-Object -First 3 | ForEach-Object {
+            @{ Name = $_.Name; CPUPercent = $_.PercentProcessorTime }
+        })
+        TopRAMServices = @(Get-Process | Sort-Object WorkingSet64 -Descending | Select-Object -First 3 | ForEach-Object {
+            @{ Name = $_.Name; MemoryMB = [math]::Round($_.WorkingSet64/1MB,0) }
+        })
+        DServices = @(
+            Get-CimInstance Win32_Service -EA SilentlyContinue | Where-Object { $_.PathName -match '[DE]:[/\]' } | ForEach-Object {
+                @{ Name = $_.Name; DisplayName = $_.DisplayName; State = $_.State }
+            }
+        )
+        TrellixStatus = @(
+            $t = Get-Service -DisplayName "Trellix Endpoint*" -EA SilentlyContinue
+            if ($t) {
+                $t | ForEach-Object { @{ Name = $_.DisplayName; State = $_.Status.ToString() } }
+            } else { @{ Name = "Trellix"; State = "NotFound" } }
+        )
+        Firewall = @{
+            Domain = (Get-NetFirewallProfile -Name Domain -EA SilentlyContinue).Enabled -eq $true
+            Private = (Get-NetFirewallProfile -Name Private -EA SilentlyContinue).Enabled -eq $true
+            Public = (Get-NetFirewallProfile -Name Public -EA SilentlyContinue).Enabled -eq $true
+        }
+        IIS = $(
+            $iisService = Get-Service -Name W3SVC -EA SilentlyContinue
+            if ($iisService) {
+                try {
+                    Import-Module WebAdministration -EA Stop
+                    @{
+                        Installed = $true
+                        ServiceState = $iisService.Status.ToString()
+                        AppPools = @(Get-ChildItem IIS:\AppPools -EA SilentlyContinue | ForEach-Object {
+                            @{ Name = $_.Name; State = $_.State }
+                        })
+                        Sites = @(Get-ChildItem IIS:\Sites -EA SilentlyContinue | ForEach-Object {
+                            @{ Name = $_.Name; State = $_.State; Bindings = ($_.Bindings.Collection | ForEach-Object { $_.bindingInformation }) -join ", " }
+                        })
+                    }
+                } catch {
+                    @{ Installed = $true; ServiceState = $iisService.Status.ToString(); AppPools = @(); Sites = @(); Error = "Modul WebAdministration niedostepny" }
+                }
+            } else {
+                @{ Installed = $false }
+            }
+        )
+    }
+}
+
+# Wczytaj konfiguracje DMZ
+if (-not (Test-Path $ConfigPath)) {
+    Write-Log "BLAD: Brak pliku konfiguracji: $ConfigPath"
+    exit 1
+}
+
+$config = Get-Content $ConfigPath -Raw | ConvertFrom-Json
+if (-not $config.groups -or $config.groups.Count -eq 0) {
+    Write-Log "BLAD: Brak zdefiniowanych grup w konfiguracji"
+    exit 1
+}
+
+Write-Log "START zbierania danych DMZ"
+
+$startTime = Get-Date
+# OPTYMALIZACJA: List[object] zamiast ArrayList, buforowanie logów
+$allResults = [System.Collections.Generic.List[object]]::new()
+$logBuffer = [System.Collections.Generic.List[string]]::new()
+$totalServers = 0
+$totalOk = 0
+$totalFail = 0
+
+# Opcje sesji SSL dla DMZ
+$sessionOption = New-PSSessionOption -SkipCACheck -SkipCNCheck -SkipRevocationCheck
+
+# Przetwarzaj kazda grupe
+foreach ($group in $config.groups) {
+    $groupName = $group.name
+    $username = $group.login
+    $password = $group.password
+    $servers = @($group.servers)
+
+    if ($servers.Count -eq 0) {
+        Write-Log "[$groupName] Brak serwerow - pomijam"
+        continue
+    }
+
+    Write-Log "[$groupName] Przetwarzanie $($servers.Count) serwerow..."
+
+    # Utworz credential
+    try {
+        $secret = ConvertTo-SecureString -String $password
+        $cred = New-Object -TypeName System.Management.Automation.PSCredential -ArgumentList $username, $secret
+    } catch {
+        $logBuffer.Add("[$groupName] BLAD: Nie mozna odszyfrowac hasla")
+        foreach ($server in $servers) {
+            $allResults.Add(@{
+                ServerName = $server
+                DMZGroup = $groupName
+                CollectedAt = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+                Error = "Blad deszyfrowania hasla"
+                CPU = 0; RAM = @{}; Disks = @(); TopCPUServices = @(); TopRAMServices = @()
+                DServices = @(); TrellixStatus = @(@{ Name = "Trellix"; State = "Unknown" })
+                Firewall = @{ Domain = $false; Private = $false; Public = $false }
+                IIS = @{ Installed = $false }
+            })
+            $totalFail++
+        }
+        $totalServers += $servers.Count
+        continue
+    }
+
+    # OPTYMALIZACJA: Persistent PSSession dla całej grupy
+    $groupOk = [System.Collections.Generic.List[string]]::new()
+    $sessions = $null
+
+    try {
+        # Utwórz sesje dla wszystkich serwerów w grupie
+        $sessions = New-PSSession -ComputerName $servers `
+            -UseSSL `
+            -Authentication Negotiate `
+            -SessionOption $sessionOption `
+            -Credential $cred `
+            -ThrottleLimit $ThrottleLimit `
+            -ErrorAction SilentlyContinue `
+            -ErrorVariable sessionErrors
+
+        if ($sessions) {
+            $results = Invoke-Command -Session $sessions `
+                -ScriptBlock $ScriptBlock `
+                -ErrorAction SilentlyContinue `
+                -ErrorVariable groupErrors
+
+            foreach ($r in $results) {
+                if ($r.ServerName) {
+                    $groupOk.Add($r.PSComputerName)
+                    $allResults.Add(@{
+                        ServerName = $r.ServerName
+                        DMZGroup = $groupName
+                        CollectedAt = $r.CollectedAt
+                        CPU = $r.CPU
+                        RAM = $r.RAM
+                        Disks = @($r.Disks)
+                        TopCPUServices = @($r.TopCPUServices)
+                        TopRAMServices = @($r.TopRAMServices)
+                        DServices = @($r.DServices)
+                        TrellixStatus = @($r.TrellixStatus)
+                        Firewall = $r.Firewall
+                        IIS = $r.IIS
+                        Error = $null
+                    })
+                    $logBuffer.Add("[$groupName] OK: $($r.ServerName)")
+                    $totalOk++
+                }
+            }
+        }
+    }
+    finally {
+        # Zawsze zamknij sesje
+        if ($sessions) { Remove-PSSession $sessions -ErrorAction SilentlyContinue }
+    }
+
+    # Dodaj nieudane serwery
+    foreach ($server in $servers) {
+        if ($server -notin $groupOk) {
+            $errMsg = "Timeout/Niedostepny"
+            $serverErr = $sessionErrors + $groupErrors | Where-Object { $_.TargetObject -eq $server } | Select-Object -First 1
+            if ($serverErr) { $errMsg = $serverErr.Exception.Message }
+
+            $allResults.Add(@{
+                ServerName = $server
+                DMZGroup = $groupName
+                CollectedAt = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+                Error = $errMsg
+                CPU = 0; RAM = @{}; Disks = @(); TopCPUServices = @(); TopRAMServices = @()
+                DServices = @(); TrellixStatus = @(@{ Name = "Trellix"; State = "Unknown" })
+                Firewall = @{ Domain = $false; Private = $false; Public = $false }
+                IIS = @{ Installed = $false }
+            })
+            $logBuffer.Add("[$groupName] FAIL: $server")
+            $totalFail++
+        }
+    }
+
+    $totalServers += $servers.Count
+}
+
+$duration = [math]::Round(((Get-Date) - $startTime).TotalSeconds, 1)
+
+# Sortuj wyniki - OPTYMALIZACJA: List[object]
+$sortedList = [System.Collections.Generic.List[object]]::new()
+$allResults | Sort-Object { $_.DMZGroup }, { $_.ServerName } | ForEach-Object { $sortedList.Add($_) }
+
+# Zbuduj JSON
+$serversJson = ($sortedList | ForEach-Object { $_ | ConvertTo-Json -Depth 10 -Compress }) -join ","
+
+$json = @"
+{"LastUpdate":"$((Get-Date).ToString("yyyy-MM-dd HH:mm:ss"))","CollectionDuration":$duration,"TotalServers":$totalServers,"SuccessCount":$totalOk,"FailedCount":$totalFail,"Group":"DMZ","Servers":[$serversJson]}
+"@
+
+# Upewnij sie, ze folder data istnieje
+$dataFolder = Split-Path $OutputPath -Parent
+if (-not (Test-Path $dataFolder)) {
+    New-Item -ItemType Directory -Path $dataFolder -Force | Out-Null
+}
+
+$json | Out-File $OutputPath -Encoding UTF8 -Force
+
+# OPTYMALIZACJA: Zapis wszystkich logów jednorazowo na końcu
+$logBuffer.Add("KONIEC: ${duration}s (OK: $totalOk, FAIL: $totalFail, TOTAL: $totalServers)")
+$logBuffer | ForEach-Object { Write-Log $_ }
+D:\PROD_REPO\IIS\prodHealtchCheck\scripts\Collect-ServerHealth.ps1
+#Requires -Version 5.1
+param(
+    [Parameter(Mandatory=$true)]
+    [ValidateSet("DCI", "Ferryt", "MarketPlanet", "MQ", "FileTransfer", "Klastry")]
+    [string]$Group,
+    [int]$ThrottleLimit = 100  # OPTYMALIZACJA: Zwiększony limit dla dużych środowisk
+)
+
+$BasePath = "D:\PROD_REPO_DATA\IIS\prodHealtchCheck"
+$ServerListPath = "$BasePath\serverList_$Group.txt"
+$OutputPath = "$BasePath\data\serverHealth_$Group.json"
+$LogPath = "$BasePath\ServerHealthMonitor.log"
+$LogMaxAgeHours = 48
+
+$ErrorActionPreference = "Continue"
+
+# Funkcja logowania z rollowaniem
+function Write-Log {
+    param([string]$Message)
+
+    # Rollowanie logu co 48h
+    if (Test-Path $LogPath) {
+        $logFile = Get-Item $LogPath
+        if ($logFile.LastWriteTime -lt (Get-Date).AddHours(-$LogMaxAgeHours)) {
+            $archiveName = "$BasePath\ServerHealthMonitor_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+            Move-Item $LogPath $archiveName -Force
+        }
+    }
+
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    "$timestamp [$Group] $Message" | Out-File $LogPath -Append -Encoding UTF8
+}
+
+$ScriptBlock = {
+    # OPTYMALIZACJA: Użycie Get-CimInstance zamiast Get-WmiObject (szybsze, WS-Man)
+    $disks = Get-CimInstance Win32_LogicalDisk -Filter "DriveType=3" -EA SilentlyContinue
+    $cpu = Get-CimInstance Win32_Processor -EA SilentlyContinue
+    $os = Get-CimInstance Win32_OperatingSystem -EA SilentlyContinue
+    $procs = Get-CimInstance Win32_PerfFormattedData_PerfProc_Process -EA SilentlyContinue
+
+    @{
+        ServerName = $env:COMPUTERNAME
+        CollectedAt = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+        Disks = @($disks | ForEach-Object {
+            @{
+                Drive = $_.DeviceID
+                TotalGB = [math]::Round($_.Size/1GB,1)
+                FreeGB = [math]::Round($_.FreeSpace/1GB,1)
+                PercentFree = [math]::Round(($_.FreeSpace/$_.Size)*100,0)
+            }
+        })
+        CPU = [math]::Round(($cpu.LoadPercentage | Measure-Object -Average).Average, 0)
+        RAM = $(
+            $total = [math]::Round($os.TotalVisibleMemorySize / 1MB, 1)
+            $free = [math]::Round($os.FreePhysicalMemory / 1MB, 1)
+            @{ TotalGB = $total; FreeGB = $free; UsedGB = [math]::Round($total - $free, 1); PercentUsed = [math]::Round((($total - $free) / $total) * 100, 0) }
+        )
+        TopCPUServices = @($procs |
+            Where-Object { $_.Name -ne '_Total' -and $_.Name -ne 'Idle' } |
+            Sort-Object PercentProcessorTime -Descending | Select-Object -First 3 | ForEach-Object {
+            @{ Name = $_.Name; CPUPercent = $_.PercentProcessorTime }
+        })
+        TopRAMServices = @(Get-Process | Sort-Object WorkingSet64 -Descending | Select-Object -First 3 | ForEach-Object {
+            @{ Name = $_.Name; MemoryMB = [math]::Round($_.WorkingSet64/1MB,0) }
+        })
+        DServices = @(
+            Get-CimInstance Win32_Service -EA SilentlyContinue | Where-Object { $_.PathName -match '[DE]:[/\]' } | ForEach-Object {
+                @{ Name = $_.Name; DisplayName = $_.DisplayName; State = $_.State }
+            }
+        )
+        TrellixStatus = @(
+            $t = Get-Service -DisplayName "Trellix Endpoint*" -EA SilentlyContinue
+            if ($t) {
+                $t | ForEach-Object { @{ Name = $_.DisplayName; State = $_.Status.ToString() } }
+            } else { @{ Name = "Trellix"; State = "NotFound" } }
+        )
+        Firewall = @{
+            Domain = (Get-NetFirewallProfile -Name Domain -EA SilentlyContinue).Enabled -eq $true
+            Private = (Get-NetFirewallProfile -Name Private -EA SilentlyContinue).Enabled -eq $true
+            Public = (Get-NetFirewallProfile -Name Public -EA SilentlyContinue).Enabled -eq $true
+        }
+        IIS = $(
+            $iisService = Get-Service -Name W3SVC -EA SilentlyContinue
+            if ($iisService) {
+                try {
+                    Import-Module WebAdministration -EA Stop
+                    @{
+                        Installed = $true
+                        ServiceState = $iisService.Status.ToString()
+                        AppPools = @(Get-ChildItem IIS:\AppPools -EA SilentlyContinue | ForEach-Object {
+                            @{ Name = $_.Name; State = $_.State }
+                        })
+                        Sites = @(Get-ChildItem IIS:\Sites -EA SilentlyContinue | ForEach-Object {
+                            @{ Name = $_.Name; State = $_.State; Bindings = ($_.Bindings.Collection | ForEach-Object { $_.bindingInformation }) -join ", " }
+                        })
+                    }
+                } catch {
+                    @{ Installed = $true; ServiceState = $iisService.Status.ToString(); AppPools = @(); Sites = @(); Error = "Modul WebAdministration niedostepny" }
+                }
+            } else {
+                @{ Installed = $false }
+            }
+        )
+    }
+}
+
+# Wczytaj serwery
+if (-not (Test-Path $ServerListPath)) {
+    Write-Log "BLAD: Brak pliku: $ServerListPath"
+    exit 1
+}
+
+$servers = @(Get-Content $ServerListPath | Where-Object { $_ -match '\S' -and $_ -notmatch '^\s*#' } | ForEach-Object { $_.Trim() })
+if ($servers.Count -eq 0) {
+    Write-Log "BLAD: Pusta lista serwerow"
+    exit 1
+}
+
+Write-Log "START zbierania z $($servers.Count) serwerow"
+$startTime = Get-Date
+
+# Wykonaj
+$results = Invoke-Command -ComputerName $servers -ScriptBlock $ScriptBlock -ThrottleLimit $ThrottleLimit -ErrorAction SilentlyContinue -ErrorVariable errs
+
+# Przetworzenie - OPTYMALIZACJA: List[object] zamiast ArrayList, buforowanie logów
+$allResults = [System.Collections.Generic.List[object]]::new()
+$ok = [System.Collections.Generic.List[string]]::new()
+$logBuffer = [System.Collections.Generic.List[string]]::new()
+
+foreach ($r in $results) {
+    if ($r.ServerName) {
+        $ok.Add($r.ServerName)
+        $allResults.Add(@{
+            ServerName = $r.ServerName
+            CollectedAt = $r.CollectedAt
+            CPU = $r.CPU
+            RAM = $r.RAM
+            Disks = @($r.Disks)
+            TopCPUServices = @($r.TopCPUServices)
+            TopRAMServices = @($r.TopRAMServices)
+            DServices = @($r.DServices)
+            TrellixStatus = @($r.TrellixStatus)
+            Firewall = $r.Firewall
+            IIS = $r.IIS
+            Error = $null
+        })
+        $logBuffer.Add("OK: $($r.ServerName)")
+    }
+}
+
+foreach ($f in ($servers | Where-Object { $_ -notin $ok })) {
+    $allResults.Add(@{
+        ServerName = $f
+        CollectedAt = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+        Error = "Timeout/Niedostepny"
+        CPU = 0
+        RAM = @{}
+        Disks = @()
+        TopCPUServices = @()
+        TopRAMServices = @()
+        DServices = @()
+        TrellixStatus = @(@{ Name = "Trellix"; State = "Unknown" })
+        Firewall = @{ Domain = $false; Private = $false; Public = $false }
+        IIS = @{ Installed = $false }
+    })
+    $logBuffer.Add("FAIL: $f")
+}
+
+$duration = [math]::Round(((Get-Date) - $startTime).TotalSeconds, 1)
+
+# Sortuj - OPTYMALIZACJA: List[object] zamiast ArrayList
+$sortedList = [System.Collections.Generic.List[object]]::new()
+$allResults | Sort-Object { $_.ServerName } | ForEach-Object { $sortedList.Add($_) }
+
+# Zbuduj JSON
+$serversJson = ($sortedList | ForEach-Object { $_ | ConvertTo-Json -Depth 10 -Compress }) -join ","
+
+$json = @"
+{"LastUpdate":"$((Get-Date).ToString("yyyy-MM-dd HH:mm:ss"))","CollectionDuration":$duration,"TotalServers":$($servers.Count),"SuccessCount":$($ok.Count),"FailedCount":$($servers.Count - $ok.Count),"Group":"$Group","Servers":[$serversJson]}
+"@
+
+$json | Out-File $OutputPath -Encoding UTF8 -Force
+
+# OPTYMALIZACJA: Zapis wszystkich logów jednorazowo na końcu
+$logBuffer.Add("KONIEC: ${duration}s (OK: $($ok.Count), FAIL: $($servers.Count - $ok.Count))")
+$logBuffer | ForEach-Object { Write-Log $_ }
+D:\PROD_REPO\IIS\prodHealtchCheck\scripts\Collect-AllGroups.ps1
+#Requires -Version 5.1
+# Skrypt zbiorczy - uruchamia zbieranie danych dla wszystkich grup RÓWNOLEGLE
+
+$ScriptPath = $PSScriptRoot
+$BasePath = "D:\PROD_REPO_DATA\IIS\prodHealtchCheck"
+$LogPath = "$BasePath\ServerHealthMonitor.log"
+$LogMaxAgeHours = 48
+
+$Groups = @("DCI", "Ferryt", "MarketPlanet", "MQ", "FileTransfer", "Klastry")
+
+# Funkcja logowania z rollowaniem
+function Write-Log {
+    param([string]$Message)
+
+    if (Test-Path $LogPath) {
+        $logFile = Get-Item $LogPath
+        if ($logFile.LastWriteTime -lt (Get-Date).AddHours(-$LogMaxAgeHours)) {
+            $archiveName = "$BasePath\ServerHealthMonitor_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+            Move-Item $LogPath $archiveName -Force
+        }
+    }
+
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    "$timestamp [ALL] $Message" | Out-File $LogPath -Append -Encoding UTF8
+}
+
+Write-Log "=== START zbierania dla wszystkich grup (PARALLEL) ==="
+$startTime = Get-Date
+
+# OPTYMALIZACJA: Równoległe wykonanie wszystkich grup LAN + DMZ + Klastry
+$jobs = [System.Collections.Generic.List[object]]::new()
+
+# Uruchom wszystkie grupy LAN równolegle
+foreach ($Group in $Groups) {
+    $jobs.Add((Start-Job -FilePath "$ScriptPath\Collect-ServerHealth.ps1" -ArgumentList $Group -Name "LAN_$Group"))
+}
+
+# Uruchom DMZ równolegle
+$jobs.Add((Start-Job -FilePath "$ScriptPath\Collect-ServerHealth-DMZ.ps1" -Name "DMZ"))
+
+# Uruchom Klastry równolegle
+$jobs.Add((Start-Job -FilePath "$ScriptPath\Collect-ClusterStatus.ps1" -Name "Clusters"))
+
+# Czekaj na wszystkie zadania
+Write-Log "Uruchomiono $($jobs.Count) zadań równolegle, czekam na zakończenie..."
+$jobs | Wait-Job | Out-Null
+
+# Zbierz wyniki i zaloguj
+foreach ($job in $jobs) {
+    $status = if ($job.State -eq 'Completed') { "OK" } else { "FAIL ($($job.State))" }
+    Write-Log "Zakończono: $($job.Name) - $status"
+    Remove-Job $job -Force
+}
+
+$duration = [math]::Round(((Get-Date) - $startTime).TotalSeconds, 1)
+Write-Log "=== KONIEC zbierania dla wszystkich grup (${duration}s) ==="
+
+exit 0
+D:\PROD_REPO\IIS\prodHealtchCheck\scripts\Encrypt-Password.ps1
+# =============================================================
+# Encrypt-Password.ps1
+# Skrypt do szyfrowania hasla dla DMZ
+# Uruchom w PowerShell ISE lub konsoli PowerShell
+# UWAGA: Zaszyfrowane haslo dziala TYLKO na tym samym komputerze
+#        i dla tego samego uzytkownika Windows!
+# =============================================================
+
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host "  SZYFROWANIE HASLA DLA DMZ" -ForegroundColor Cyan
+Write-Host "========================================" -ForegroundColor Cyan
+Write-Host ""
+
+# Pobierz haslo od uzytkownika (ukryte wprowadzanie)
+$securePassword = Read-Host -Prompt "Wprowadz haslo do zaszyfrowania" -AsSecureString
+
+# Konwersja na zaszyfrowany string
+$encryptedPassword = ConvertFrom-SecureString -SecureString $securePassword
+
+Write-Host ""
+Write-Host "========================================" -ForegroundColor Green
+Write-Host "  ZASZYFROWANE HASLO:" -ForegroundColor Green
+Write-Host "========================================" -ForegroundColor Green
+Write-Host ""
+Write-Host $encryptedPassword -ForegroundColor Yellow
+Write-Host ""
+Write-Host "========================================" -ForegroundColor Green
+Write-Host ""
+Write-Host "Skopiuj powyzszy ciag i wklej do pliku serverList_DMZ.json" -ForegroundColor Cyan
+Write-Host "w polu 'password' dla odpowiedniej grupy." -ForegroundColor Cyan
+Write-Host ""
+Write-Host "PAMIETAJ: To haslo zadziala TYLKO na tym komputerze" -ForegroundColor Red
+Write-Host "          i dla tego samego uzytkownika Windows!" -ForegroundColor Red
+Write-Host ""
+
+# Opcjonalnie: skopiuj do schowka
+$copyToClipboard = Read-Host "Skopiowac do schowka? (T/N)"
+if ($copyToClipboard -eq "T" -or $copyToClipboard -eq "t") {
+    $encryptedPassword | Set-Clipboard
+    Write-Host "Skopiowano do schowka!" -ForegroundColor Green
+}

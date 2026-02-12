@@ -14,8 +14,15 @@ const infraTabs = {
     KolejkiMQ:      { renderer: renderMQQueues }
 };
 
+// Zakładka logów
+const logsTabs = ['LogiEventLog'];
+
 function isInfraTab(group) {
     return group in infraTabs;
+}
+
+function isLogsTab(group) {
+    return logsTabs.includes(group);
 }
 
 // =============================================================================
@@ -24,7 +31,13 @@ function isInfraTab(group) {
 
 async function loadData() {
     try {
-        if (isInfraTab(currentGroup)) {
+        if (isLogsTab(currentGroup)) {
+            // Zakładka logów - renderuj formularz, nie ładuj danych automatycznie
+            serverData = null;
+            infraData = null;
+            LogsViewer.render();
+            return;
+        } else if (isInfraTab(currentGroup)) {
             const response = await fetch('api.aspx?type=infra&group=' + currentGroup + '&t=' + Date.now());
             infraData = await response.json();
             serverData = null;
@@ -51,6 +64,13 @@ function switchTab(group) {
     // Resetuj filtr krytycznych
     criticalFilterActive = false;
     document.querySelector('.stat-card.warning').classList.remove('active');
+
+    // Dla zakładki logów - ukryj pasek statystyk wyszukiwania
+    if (isLogsTab(group)) {
+        document.getElementById('tabSearchBar').style.display = 'none';
+    } else {
+        document.getElementById('tabSearchBar').style.display = '';
+    }
 
     loadData();
 }
@@ -736,6 +756,11 @@ function renderMQQueues(data) {
 // =============================================================================
 
 async function refreshData() {
+    // Dla zakładki logów - nie ma auto-odświeżania
+    if (isLogsTab(currentGroup)) {
+        return;
+    }
+
     // Dla zakładek infra - po prostu przeładuj dane
     if (isInfraTab(currentGroup)) {
         const modal = document.getElementById('refreshModal');
@@ -838,6 +863,9 @@ function waitForUpdate(oldUpdate, modal, modalText, wasRunning) {
 
 // Auto-odświeżanie co 60s
 async function checkForUpdates() {
+    // Logi nie mają auto-odświeżania - każdy użytkownik sam pobiera dane
+    if (isLogsTab(currentGroup)) return;
+
     try {
         if (isInfraTab(currentGroup)) {
             const response = await fetch('api.aspx?type=infra&group=' + currentGroup + '&t=' + Date.now());
@@ -864,6 +892,429 @@ async function checkForUpdates() {
         // Cicha obsługa błędu
     }
 }
+
+// =============================================================================
+// LOGS VIEWER MODULE
+// Każdy użytkownik przeglądarki ma własną instancję stanu (logsData, currentServer, itd.)
+// dzięki czemu wielu użytkowników może jednocześnie korzystać z przeglądarki logów
+// bez wzajemnych interferencji.
+// =============================================================================
+
+const LogsViewer = (function() {
+    // --- Stan per sesja przeglądarki (izolacja wielu użytkowników) ---
+    let logsData = {};
+    let currentServer = null;
+    let currentSort = { column: 'TimeCreated', direction: 'desc' };
+    let searchTerm = '';
+    let logTypes = null;
+
+    // --- Załaduj typy logów z konfiguracji ---
+    async function loadLogTypes() {
+        if (logTypes) return logTypes;
+        try {
+            const resp = await fetch('api.aspx?action=getLogTypes&t=' + Date.now());
+            logTypes = await resp.json();
+        } catch (e) {
+            logTypes = [
+                { name: 'Application', displayName: 'Application' },
+                { name: 'System', displayName: 'System' }
+            ];
+        }
+        return logTypes;
+    }
+
+    // --- Renderuj formularz i kontener wyników ---
+    async function render() {
+        const types = await loadLogTypes();
+        const grid = document.getElementById('serverGrid');
+        const searchBar = document.getElementById('tabSearchBar');
+        searchBar.innerHTML = '';
+
+        // Aktualizuj nagłówek statystyk
+        document.getElementById('lastUpdate').textContent = '-';
+        document.getElementById('duration').textContent = '-';
+        document.getElementById('totalServers').textContent = '-';
+        document.getElementById('successServers').textContent = '-';
+        document.getElementById('failedServers').textContent = '-';
+        document.getElementById('criticalServers').textContent = '-';
+
+        grid.innerHTML = `
+            <div class="logs-viewer">
+                <div class="logs-form-container">
+                    <div class="logs-title">Logi systemowe Windows Event Log</div>
+                    <form id="logsQueryForm" class="logs-form">
+                        <div class="logs-form-group">
+                            <label for="logsServers">Serwery (oddzielone przecinkami):</label>
+                            <input type="text" id="logsServers" placeholder="np. SERVER01, SERVER02" required>
+                        </div>
+                        <div class="logs-form-group">
+                            <label for="logsLogType">Typ logów:</label>
+                            <select id="logsLogType" required>
+                                ${types.map((lt, i) => '<option value="' + lt.name + '"' + (i === 0 ? ' selected' : '') + '>' + lt.displayName + '</option>').join('')}
+                            </select>
+                        </div>
+                        <div class="logs-form-group">
+                            <label for="logsPeriod">Okres:</label>
+                            <select id="logsPeriod" required>
+                                <option value="10min">10 minut</option>
+                                <option value="30min">30 minut</option>
+                                <option value="1h" selected>1 godzina</option>
+                                <option value="2h">2 godziny</option>
+                                <option value="6h">6 godzin</option>
+                                <option value="12h">12 godzin</option>
+                                <option value="24h">24 godziny</option>
+                            </select>
+                        </div>
+                        <button type="submit" id="logsSubmitBtn" class="logs-submit-btn">Pokaż logi</button>
+                    </form>
+                </div>
+
+                <div id="logsLoader" class="logs-loader" style="display: none;">
+                    <div class="spinner"></div>
+                    <span>Pobieranie logów...</span>
+                </div>
+
+                <div id="logsError" class="logs-error" style="display: none;"></div>
+
+                <div id="logsResults" style="display: none;">
+                    <div id="logsServerTabs" class="logs-server-tabs"></div>
+                    <div class="logs-search-container">
+                        <input type="text" id="logsSearchInput" placeholder="Szukaj w logach...">
+                        <span id="logsSearchCount"></span>
+                    </div>
+                    <div class="logs-table-container">
+                        <table class="logs-table" id="logsTable">
+                            <thead>
+                                <tr>
+                                    <th class="logs-sortable" data-logsort="TimeCreated">Data/Czas</th>
+                                    <th class="logs-sortable" data-logsort="Level">Typ</th>
+                                    <th class="logs-sortable" data-logsort="EventId">Kod zdarzenia</th>
+                                    <th class="logs-sortable" data-logsort="Source">Źródło</th>
+                                    <th class="logs-sortable" data-logsort="Message">Opis</th>
+                                </tr>
+                            </thead>
+                            <tbody id="logsTableBody"></tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        // Podłącz event handlery
+        document.getElementById('logsQueryForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            submit();
+        });
+
+        document.getElementById('logsSearchInput').addEventListener('input', function(e) {
+            searchTerm = e.target.value.trim().toLowerCase();
+            if (currentServer) renderLogTable(currentServer);
+        });
+
+        document.querySelectorAll('.logs-sortable').forEach(function(th) {
+            th.addEventListener('click', function() {
+                handleSort(th.dataset.logsort);
+            });
+        });
+    }
+
+    // --- Wyślij formularz ---
+    async function submit() {
+        const servers = document.getElementById('logsServers').value.trim();
+        const logType = document.getElementById('logsLogType').value;
+        const period = document.getElementById('logsPeriod').value;
+
+        if (!servers) {
+            showError('Proszę podać nazwę serwera.');
+            return;
+        }
+
+        showLoader(true);
+        hideError();
+        hideResults();
+
+        try {
+            const params = new URLSearchParams({
+                action: 'getLogs',
+                servers: servers,
+                logType: logType,
+                period: period,
+                t: Date.now()
+            });
+
+            const response = await fetch('api.aspx?' + params.toString());
+
+            if (!response.ok) {
+                let errMsg = 'Błąd serwera (HTTP ' + response.status + ')';
+                try {
+                    const data = await response.json();
+                    if (data.error) errMsg = data.error;
+                } catch(e) {}
+                throw new Error(errMsg);
+            }
+
+            const data = await response.json();
+            showLoader(false);
+            logsData = data;
+            currentServer = null;
+            searchTerm = '';
+            const searchInput = document.getElementById('logsSearchInput');
+            if (searchInput) searchInput.value = '';
+            renderServerTabs(data);
+            showResults();
+        } catch (error) {
+            showLoader(false);
+            showError('Błąd pobierania logów: ' + error.message);
+        }
+    }
+
+    // --- Renderuj zakładki serwerów ---
+    function renderServerTabs(data) {
+        const tabsContainer = document.getElementById('logsServerTabs');
+        if (!tabsContainer) return;
+        tabsContainer.innerHTML = '';
+
+        const servers = Object.keys(data);
+        if (servers.length === 0) {
+            showError('Brak danych do wyświetlenia.');
+            return;
+        }
+
+        servers.forEach(function(server, index) {
+            const btn = document.createElement('button');
+            btn.className = 'logs-server-tab';
+            btn.type = 'button';
+
+            const srvData = data[server];
+            const logCount = srvData.success ? (Array.isArray(srvData.logs) ? srvData.logs.length : (srvData.logs ? 1 : 0)) : 0;
+
+            btn.innerHTML = escapeHtml(server) + ' <span class="logs-count">(' + logCount + ')</span>';
+
+            if (!srvData.success) {
+                btn.classList.add('error');
+                btn.title = srvData.error || 'Błąd pobierania logów';
+            }
+
+            btn.addEventListener('click', function() {
+                selectServer(server, btn);
+            });
+            tabsContainer.appendChild(btn);
+
+            if (index === 0) {
+                selectServer(server, btn);
+            }
+        });
+    }
+
+    function selectServer(server, tabElement) {
+        document.querySelectorAll('.logs-server-tab').forEach(function(t) { t.classList.remove('active'); });
+        tabElement.classList.add('active');
+        currentServer = server;
+        renderLogTable(server);
+    }
+
+    // --- Renderuj tabelę logów ---
+    function renderLogTable(server) {
+        const tbody = document.getElementById('logsTableBody');
+        if (!tbody) return;
+        tbody.innerHTML = '';
+
+        const srvData = logsData[server];
+        if (!srvData) return;
+
+        if (!srvData.success) {
+            tbody.innerHTML = '<tr><td colspan="5" class="logs-no-data">Błąd: ' + escapeHtml(srvData.error) + '</td></tr>';
+            updateSearchCount(0, 0);
+            return;
+        }
+
+        let logs = srvData.logs;
+        if (!logs || (Array.isArray(logs) && logs.length === 0)) {
+            tbody.innerHTML = '<tr><td colspan="5" class="logs-no-data">Brak logów w wybranym okresie.</td></tr>';
+            updateSearchCount(0, 0);
+            return;
+        }
+
+        if (!Array.isArray(logs)) {
+            logs = [logs];
+        }
+
+        // Normalizuj i sortuj
+        logs = logs.map(normalizeLogEntry);
+        logs = sortLogs(logs, currentSort.column, currentSort.direction);
+
+        const totalCount = logs.length;
+
+        // Filtruj wg wyszukiwania
+        if (searchTerm) {
+            logs = logs.filter(function(log) {
+                return [log.Level, log.EventId.toString(), log.Source, log.Message]
+                    .join(' ').toLowerCase().includes(searchTerm);
+            });
+        }
+
+        updateSearchCount(logs.length, totalCount);
+
+        if (logs.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="5" class="logs-no-data">Brak wyników dla "' + escapeHtml(searchTerm) + '"</td></tr>';
+            return;
+        }
+
+        logs.forEach(function(log) {
+            const tr = document.createElement('tr');
+            tr.className = getLevelClass(log.Level);
+            tr.innerHTML =
+                '<td>' + formatDate(log.TimeCreated) + '</td>' +
+                '<td>' + highlightText(escapeHtml(log.Level)) + '</td>' +
+                '<td>' + highlightText(log.EventId.toString()) + '</td>' +
+                '<td>' + highlightText(escapeHtml(log.Source)) + '</td>' +
+                '<td class="logs-message-cell">' + highlightText(escapeHtml(truncateMessage(log.Message, 500))) + '</td>';
+            tbody.appendChild(tr);
+        });
+
+        updateSortIndicators();
+    }
+
+    // --- Sortowanie ---
+    function handleSort(column) {
+        if (currentSort.column === column) {
+            currentSort.direction = currentSort.direction === 'asc' ? 'desc' : 'asc';
+        } else {
+            currentSort.column = column;
+            currentSort.direction = 'asc';
+        }
+        if (currentServer) renderLogTable(currentServer);
+    }
+
+    function sortLogs(logs, column, direction) {
+        return logs.sort(function(a, b) {
+            let valA = a[column];
+            let valB = b[column];
+            if (column === 'TimeCreated') {
+                valA = new Date(valA);
+                valB = new Date(valB);
+            } else if (column === 'EventId') {
+                valA = parseInt(valA) || 0;
+                valB = parseInt(valB) || 0;
+            } else {
+                valA = (valA || '').toString().toLowerCase();
+                valB = (valB || '').toString().toLowerCase();
+            }
+            let result = 0;
+            if (valA < valB) result = -1;
+            if (valA > valB) result = 1;
+            return direction === 'asc' ? result : -result;
+        });
+    }
+
+    function updateSortIndicators() {
+        document.querySelectorAll('.logs-sortable').forEach(function(th) {
+            th.classList.remove('logs-sort-asc', 'logs-sort-desc');
+            if (th.dataset.logsort === currentSort.column) {
+                th.classList.add('logs-sort-' + currentSort.direction);
+            }
+        });
+    }
+
+    // --- Pomocnicze ---
+    function normalizeLogEntry(log) {
+        return {
+            TimeCreated: log.TimeCreated,
+            Level: log.LevelDisplayName || log.Level || 'Unknown',
+            EventId: log.Id || log.EventId || 0,
+            Source: log.ProviderName || log.Source || 'Unknown',
+            Message: log.Message || ''
+        };
+    }
+
+    function getLevelClass(level) {
+        if (!level) return '';
+        const l = level.toLowerCase();
+        if (l.includes('error')) return 'logs-level-error';
+        if (l.includes('warning')) return 'logs-level-warning';
+        if (l.includes('information')) return 'logs-level-info';
+        if (l.includes('critical')) return 'logs-level-critical';
+        return '';
+    }
+
+    function formatDate(dateString) {
+        if (!dateString) return '';
+        try {
+            const date = new Date(dateString);
+            return date.toLocaleString('pl-PL', {
+                year: 'numeric', month: '2-digit', day: '2-digit',
+                hour: '2-digit', minute: '2-digit', second: '2-digit'
+            });
+        } catch (e) {
+            return dateString;
+        }
+    }
+
+    function truncateMessage(msg, maxLen) {
+        if (!msg) return '';
+        if (msg.length <= maxLen) return msg;
+        return msg.substring(0, maxLen) + '...';
+    }
+
+    function escapeHtml(text) {
+        if (!text) return '';
+        const div = document.createElement('div');
+        div.textContent = text;
+        return div.innerHTML;
+    }
+
+    function highlightText(text) {
+        if (!searchTerm || !text) return text;
+        const escaped = searchTerm.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const regex = new RegExp('(' + escaped + ')', 'gi');
+        return text.replace(regex, '<span class="logs-highlight">$1</span>');
+    }
+
+    function updateSearchCount(filtered, total) {
+        const el = document.getElementById('logsSearchCount');
+        if (!el) return;
+        if (searchTerm) {
+            el.textContent = 'Znaleziono: ' + filtered + ' z ' + total;
+        } else {
+            el.textContent = total > 0 ? 'Wszystkich: ' + total : '';
+        }
+    }
+
+    function showLoader(show) {
+        const loader = document.getElementById('logsLoader');
+        const btn = document.getElementById('logsSubmitBtn');
+        if (loader) loader.style.display = show ? 'flex' : 'none';
+        if (btn) btn.disabled = show;
+    }
+
+    function showResults() {
+        const el = document.getElementById('logsResults');
+        if (el) el.style.display = 'block';
+    }
+
+    function hideResults() {
+        const el = document.getElementById('logsResults');
+        if (el) el.style.display = 'none';
+    }
+
+    function showError(message) {
+        const el = document.getElementById('logsError');
+        if (el) {
+            el.textContent = message;
+            el.style.display = 'block';
+        }
+    }
+
+    function hideError() {
+        const el = document.getElementById('logsError');
+        if (el) el.style.display = 'none';
+    }
+
+    // --- Publiczny interfejs ---
+    return {
+        render: render
+    };
+})();
 
 // =============================================================================
 // INIT

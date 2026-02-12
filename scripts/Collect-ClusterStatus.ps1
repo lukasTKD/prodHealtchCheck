@@ -41,18 +41,16 @@ if ($allClusters.Count -eq 0) {
 }
 
 # Zbierz wszystkie nazwy FQDN klastrów do jednej listy
-# OPTYMALIZACJA: List[object] zamiast ArrayList
-$clusterList = [System.Collections.Generic.List[object]]::new()
+$clusterList = [System.Collections.ArrayList]::new()
 foreach ($cg in $allClusters) {
     foreach ($srv in $cg.servers) {
-        $clusterList.Add(@{ FQDN = $srv; Type = $cg.cluster_type })
+        [void]$clusterList.Add(@{ FQDN = $srv; Type = $cg.cluster_type })
     }
 }
 
 Write-Log "START zbierania statusu klastrow ($($clusterList.Count) klastrow)"
 $startTime = Get-Date
-$clusterResults = [System.Collections.Generic.List[object]]::new()
-$logBuffer = [System.Collections.Generic.List[string]]::new()
+$clusterResults = [System.Collections.ArrayList]::new()
 
 # --- Zbieranie danych z klastrów ---
 # OPTYMALIZACJA: Używamy runspace pool dla równoległego przetwarzania klastrów
@@ -150,68 +148,35 @@ $scriptBlock = {
     }
 }
 
-# OPTYMALIZACJA: Runspace Pool zamiast Start-Job (znacznie szybsze)
+# OPTYMALIZACJA: Równoległe przetwarzanie klastrów jeśli jest ich więcej niż 1
 if ($clusterList.Count -eq 1) {
     # Jeden klaster - wykonaj synchronicznie
     $result = & $scriptBlock -clusterFQDN $clusterList[0].FQDN -clusterType $clusterList[0].Type
     if ($result.Success) {
-        $logBuffer.Add("OK: $($result.ClusterName) ($($result.ClusterType)) - $($result.Nodes.Count) wezlow, $($result.Roles.Count) rol")
+        Write-Log "OK: $($result.ClusterName) ($($result.ClusterType)) - $($result.Nodes.Count) wezlow, $($result.Roles.Count) rol"
     } else {
-        $logBuffer.Add("FAIL: $($result.FQDN) - $($result.Error)")
+        Write-Log "FAIL: $($result.FQDN) - $($result.Error)"
     }
-    $clusterResults.Add($result)
+    [void]$clusterResults.Add($result)
 } else {
-    # Wiele klastrów - użyj Runspace Pool dla równoległości
-    $runspacePool = [RunspaceFactory]::CreateRunspacePool(1, $maxThreads)
-    $runspacePool.Open()
-
-    $runspaces = [System.Collections.Generic.List[object]]::new()
-
+    # Wiele klastrów - użyj Start-Job dla równoległości
+    $jobs = @()
     foreach ($cluster in $clusterList) {
-        $ps = [PowerShell]::Create()
-        $ps.AddScript($scriptBlock).AddArgument($cluster.FQDN).AddArgument($cluster.Type) | Out-Null
-        $ps.RunspacePool = $runspacePool
-        $runspaces.Add(@{
-            PowerShell = $ps
-            Handle = $ps.BeginInvoke()
-            FQDN = $cluster.FQDN
-        })
+        $jobs += Start-Job -ScriptBlock $scriptBlock -ArgumentList $cluster.FQDN, $cluster.Type
     }
-
-    # Zbierz wyniki
-    foreach ($rs in $runspaces) {
-        try {
-            $result = $rs.PowerShell.EndInvoke($rs.Handle)
-            if ($result -and $result.Count -gt 0) {
-                $r = $result[0]
-                if ($r.Success) {
-                    $logBuffer.Add("OK: $($r.ClusterName) ($($r.ClusterType)) - $($r.Nodes.Count) wezlow, $($r.Roles.Count) rol")
-                } else {
-                    $logBuffer.Add("FAIL: $($r.FQDN) - $($r.Error)")
-                }
-                $clusterResults.Add($r)
-            }
+    
+    # Czekaj na zakończenie wszystkich zadań
+    $jobs | Wait-Job | ForEach-Object {
+        $result = Receive-Job $_
+        Remove-Job $_
+        
+        if ($result.Success) {
+            Write-Log "OK: $($result.ClusterName) ($($result.ClusterType)) - $($result.Nodes.Count) wezlow, $($result.Roles.Count) rol"
+        } else {
+            Write-Log "FAIL: $($result.FQDN) - $($result.Error)"
         }
-        catch {
-            $logBuffer.Add("FAIL: $($rs.FQDN) - $($_.Exception.Message)")
-            $clusterResults.Add(@{
-                Success = $false
-                ClusterName = $rs.FQDN -replace '\..*$', ''
-                FQDN = $rs.FQDN
-                ClusterType = "Unknown"
-                Status = "Error"
-                Nodes = @()
-                Roles = @()
-                Error = $_.Exception.Message
-            })
-        }
-        finally {
-            $rs.PowerShell.Dispose()
-        }
+        [void]$clusterResults.Add($result)
     }
-
-    $runspacePool.Close()
-    $runspacePool.Dispose()
 }
 
 # --- Zapisz wynik ---
@@ -229,6 +194,4 @@ $output = @{
 
 $output | ConvertTo-Json -Depth 10 | Out-File $OutputPath -Encoding UTF8 -Force
 
-# OPTYMALIZACJA: Zapis wszystkich logów jednorazowo na końcu
-$logBuffer.Add("KONIEC: ${duration}s (OK: $onlineCount, FAIL: $($clusterResults.Count - $onlineCount))")
-$logBuffer | ForEach-Object { Write-Log $_ }
+Write-Log "KONIEC: ${duration}s (OK: $onlineCount, FAIL: $($clusterResults.Count - $onlineCount))"
