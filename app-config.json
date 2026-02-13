@@ -23,27 +23,25 @@
     },
     "Collect-ClusterStatus": {
       "description": "Zbiera status klastrów Windows",
-      "sourceFile": "clusters_config.csv",
-      "mqServersFile": "mq_servers_config.csv",
-      "destNodes": "cluster_nodes.csv",
-      "destRoles": "cluster_roles.csv"
+      "sourceFile": "clusters.json",
+      "destFile": "infra_ClustersWindows.json"
     },
     "Collect-InfraDaily": {
       "description": "Zbiera dane infrastrukturalne raz dziennie (FileShare, SQL, MQ)",
       "sources": {
-        "clusters": "clusters_config.csv",
-        "mqServers": "mq_servers_config.csv"
+        "clusters": "clusters.json",
+        "mqServers": "mq_servers.json"
       },
       "destinations": {
-        "fileShares": "fileShare.csv",
-        "sqlInstances": "sql_db_details.csv",
-        "mqQueues": "mq_queue_list.csv"
+        "fileShares": "infra_UdzialySieciowe.json",
+        "sqlInstances": "infra_InstancjeSQL.json",
+        "mqQueues": "infra_KolejkiMQ.json"
       }
     },
     "Collect-ClusterRoleSwitches": {
       "description": "Zbiera historię przełączeń ról klastrów",
-      "sourceFile": "clusters_config.csv",
-      "destFile": "role_switches.csv"
+      "sourceFile": "clusters.json",
+      "destFile": "infra_PrzelaczeniaRol.json"
     },
     "GetLogs": {
       "description": "Pobiera logi Windows Event Log",
