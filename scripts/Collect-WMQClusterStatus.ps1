@@ -3,20 +3,25 @@
 # Zbiera status klastrów IBM MQ i zapisuje w formacie infra_ClustersWMQ.json
 # =============================================================================
 
-param(
-    [string]$ConfigPath = "D:\PROD_REPO_DATA\IIS\prodHealtchCheck\config\mq_servers.json",
-    [string]$OutputPath = "D:\PROD_REPO_DATA\IIS\prodHealtchCheck\data\infra_ClustersWMQ.json"
-)
-
 $StartTime = Get-Date
 
+# --- SCIEZKI ---
+$ScriptDir  = Split-Path $PSScriptRoot -Parent
+$appConfig  = [System.IO.File]::ReadAllText("$ScriptDir\app-config.json") | ConvertFrom-Json
+$DataPath   = $appConfig.paths.dataPath
+$ConfigPath = $appConfig.paths.configPath
+
+# Plik wyjsciowy z konfiguracji
+$OutputPath = Join-Path $DataPath $appConfig.outputs.clusters.wmq
+
 # Wczytaj konfigurację klastrów MQ
-if (-not (Test-Path $ConfigPath)) {
-    Write-Error "Brak pliku konfiguracji: $ConfigPath"
+$MQConfigFile = Join-Path $ConfigPath "mq_servers.json"
+if (-not (Test-Path $MQConfigFile)) {
+    Write-Error "Brak pliku konfiguracji: $MQConfigFile"
     exit 1
 }
 
-$MQClusters = Get-Content $ConfigPath -Raw | ConvertFrom-Json
+$MQClusters = Get-Content $MQConfigFile -Raw | ConvertFrom-Json
 
 # Przygotuj strukturę wynikową
 $Clusters = @()

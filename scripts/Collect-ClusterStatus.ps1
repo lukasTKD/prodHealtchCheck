@@ -10,6 +10,10 @@ $DataPath   = $appConfig.paths.dataPath
 $ConfigPath = $appConfig.paths.configPath
 $LogsPath   = $appConfig.paths.logsPath
 
+# Pliki wyjsciowe z konfiguracji
+$SqlOutputFile    = Join-Path $DataPath $appConfig.outputs.clusters.sql
+$FShareOutputFile = Join-Path $DataPath $appConfig.outputs.clusters.fileShare
+
 if (!(Test-Path $DataPath))  { New-Item -ItemType Directory -Path $DataPath  -Force | Out-Null }
 if (!(Test-Path $LogsPath))  { New-Item -ItemType Directory -Path $LogsPath  -Force | Out-Null }
 
@@ -129,7 +133,6 @@ $Duration = [math]::Round(($EndTime - $StartTime).TotalSeconds, 1)
 # --- ZAPIS SQL ---
 if ($sqlClusters.Count -gt 0) {
     $sqlOnline = @($sqlClusters | Where-Object { -not $_.Error }).Count
-    $sqlOutput = "$DataPath\infra_ClustersSQL.json"
 
     @{
         LastUpdate         = $EndTime.ToString("yyyy-MM-dd HH:mm:ss")
@@ -138,15 +141,14 @@ if ($sqlClusters.Count -gt 0) {
         OnlineCount        = $sqlOnline
         FailedCount        = $sqlClusters.Count - $sqlOnline
         Clusters           = $sqlClusters
-    } | ConvertTo-Json -Depth 10 | Out-File $sqlOutput -Encoding UTF8 -Force
+    } | ConvertTo-Json -Depth 10 | Out-File $SqlOutputFile -Encoding UTF8 -Force
 
-    Log "Zapisano SQL: $sqlOutput ($($sqlClusters.Count) klastrow)"
+    Log "Zapisano SQL: $SqlOutputFile ($($sqlClusters.Count) klastrow)"
 }
 
 # --- ZAPIS FileShare ---
 if ($fshareClusters.Count -gt 0) {
     $fshareOnline = @($fshareClusters | Where-Object { -not $_.Error }).Count
-    $fshareOutput = "$DataPath\infra_ClustersFileShare.json"
 
     @{
         LastUpdate         = $EndTime.ToString("yyyy-MM-dd HH:mm:ss")
@@ -155,9 +157,9 @@ if ($fshareClusters.Count -gt 0) {
         OnlineCount        = $fshareOnline
         FailedCount        = $fshareClusters.Count - $fshareOnline
         Clusters           = $fshareClusters
-    } | ConvertTo-Json -Depth 10 | Out-File $fshareOutput -Encoding UTF8 -Force
+    } | ConvertTo-Json -Depth 10 | Out-File $FShareOutputFile -Encoding UTF8 -Force
 
-    Log "Zapisano FileShare: $fshareOutput ($($fshareClusters.Count) klastrow)"
+    Log "Zapisano FileShare: $FShareOutputFile ($($fshareClusters.Count) klastrow)"
 }
 
 $totalClusters = $sqlClusters.Count + $fshareClusters.Count

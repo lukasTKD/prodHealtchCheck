@@ -12,14 +12,15 @@ if (Test-Path $ConfigFile) {
     $DataPath = $appConfig.paths.dataPath
     $LogsPath = $appConfig.paths.logsPath
     $ConfigPath = $appConfig.paths.configPath
+    # Plik wyjsciowy z konfiguracji
+    $OutputFile = Join-Path $DataPath $appConfig.outputs.infra.udzialySieciowe
 } else {
     $BasePath = "D:\PROD_REPO_DATA\IIS\prodHealtchCheck"
     $DataPath = "$BasePath\data"
     $LogsPath = "$BasePath\logs"
     $ConfigPath = "$BasePath\config"
+    $OutputFile = "$DataPath\infra_UdzialySieciowe.json"
 }
-
-$OutputFile = "$DataPath\infra_UdzialySieciowe.json"
 $LogPath = "$LogsPath\ServerHealthMonitor.log"
 
 function Write-Log {

@@ -5,5 +5,22 @@
     "logsPath": "D:\\PROD_REPO_DATA\\IIS\\prodHealtchCheck\\logs",
     "configPath": "D:\\PROD_REPO_DATA\\IIS\\prodHealtchCheck\\config",
     "eventLogsPath": "D:\\PROD_REPO_DATA\\IIS\\prodHealtchCheck\\EventLogs"
+  },
+  "outputs": {
+    "clusters": {
+      "sql": "infra_ClustersSQL.json",
+      "fileShare": "infra_ClustersFileShare.json",
+      "wmq": "infra_ClustersWMQ.json"
+    },
+    "infra": {
+      "udzialySieciowe": "infra_UdzialySieciowe.json",
+      "instancjeSQL": "infra_InstancjeSQL.json",
+      "kolejkiMQ": "infra_KolejkiMQ.json",
+      "przelaczeniaRol": "infra_PrzelaczeniaRol.json"
+    },
+    "serverHealth": {
+      "pattern": "serverHealth_{Group}.json",
+      "dmz": "serverHealth_DMZ.json"
+    }
   }
 }
