@@ -27,11 +27,10 @@
       "destFile": "infra_ClustersWindows.json"
     },
     "Collect-InfraDaily": {
-      "description": "Zbiera dane infrastrukturalne raz dziennie",
+      "description": "Zbiera dane infrastrukturalne raz dziennie (FileShare, SQL, MQ)",
       "sources": {
-        "fileShares": "fileshare.csv",
-        "sqlInstances": "sql_db_details.csv",
-        "mqConfig": "mq_servers.json"
+        "clusters": "clusters.json",
+        "mqServers": "mq_servers.json"
       },
       "destinations": {
         "fileShares": "infra_UdzialySieciowe.json",

@@ -17,8 +17,8 @@ System monitorowania stanu serwerów Windows z interfejsem webowym.
 
 ### Infrastruktura
 - **Klastry Windows** — węzły, role, IP, status (Online/Offline) z podziałem na typy (SQL/FileShare/MQ)
-- **Udziały sieciowe** — dane z pliku CSV (fileshare.csv)
-- **Instancje SQL** — dane z pliku CSV (sql_db_details.csv)
+- **Udziały sieciowe** — pobierane z klastrów FileShare (Get-SmbShare)
+- **Instancje SQL** — pobierane z klastrów SQL (Availability Groups)
 - **Kolejki MQ** — QManager, status (Running/inne), port listenera, nazwy kolejek, serwer
 - **Przełączenia ról** — historia failover/failback klastrów Windows z ostatnich 30 dni
 
@@ -86,8 +86,7 @@ D:\PROD_REPO_DATA\IIS\prodHealtchCheck\
 │   ├── serverList_DMZ.json              # Konfiguracja DMZ (JSON z grupami)
 │   ├── mq_servers.json                  # Konfiguracja serwerów MQ (klastry + serwery)
 │   ├── EventLogsConfig.json             # Typy logów Event Log
-│   ├── fileshare.csv                    # Dane udziałów sieciowych
-│   └── sql_db_details.csv               # Dane instancji SQL
+│   └── mq_servers.json                  # Konfiguracja serwerów MQ
 │
 ├── data/                                # DANE JSON (generowane przez skrypty)
 │   ├── serverHealth_DCI.json
@@ -138,8 +137,8 @@ Plik `app-config.json` w głównym katalogu zawiera wszystkie ścieżki używane
     },
     "Collect-InfraDaily": {
       "sources": {
-        "fileShares": "fileshare.csv",
-        "sqlInstances": "sql_db_details.csv"
+        "clusters": "clusters.json",
+        "mqServers": "mq_servers.json"
       }
     }
   },
@@ -206,19 +205,6 @@ SERVER3
 }
 ```
 
-#### fileshare.csv (udziały sieciowe)
-```csv
-ShareName,SharePath,ShareState,ShareClusterRole
-Backup,D:\Backup,Online,FileServer1
-Public,E:\Public,Online,FileServer1
-```
-
-#### sql_db_details.csv (instancje SQL)
-```csv
-DatabaseName,sql_server,CompatibilityLevel,SQLServerVersion,State
-master,SQLSERVER1,150,15.0.4312.2,ONLINE
-tempdb,SQLSERVER1,150,15.0.4312.2,ONLINE
-```
 
 ### Krok 4: Uruchom zbieranie danych
 
@@ -326,42 +312,6 @@ Konfiguracja klastrów Windows używana przez:
 
 > **Uwaga:** Jeśli istnieje `clusterNames`, skrypt używa tej listy. W przeciwnym razie wyciąga serwery z `clusters`.
 
-### fileshare.csv
-
-Dane udziałów sieciowych wyświetlane w zakładce "Udziały sieciowe".
-
-```csv
-ShareName,SharePath,ShareState,ShareClusterRole
-Backup,D:\Backup,Online,FileServer1
-Public,E:\Public,Online,FileServer1
-Archive,F:\Archive,Online,FileServer2
-```
-
-| Kolumna | Opis |
-|---------|------|
-| `ShareName` | Nazwa udziału |
-| `SharePath` | Ścieżka lokalna na serwerze |
-| `ShareState` | Stan (Online/Offline) |
-| `ShareClusterRole` | Nazwa serwera/roli (grupowanie) |
-
-### sql_db_details.csv
-
-Dane instancji SQL wyświetlane w zakładce "Instancje SQL".
-
-```csv
-DatabaseName,sql_server,CompatibilityLevel,SQLServerVersion,State
-master,SQLSERVER1,150,15.0.4312.2,ONLINE
-tempdb,SQLSERVER1,150,15.0.4312.2,ONLINE
-mydb,SQLSERVER1,140,15.0.4312.2,ONLINE
-```
-
-| Kolumna | Opis |
-|---------|------|
-| `DatabaseName` | Nazwa bazy danych |
-| `sql_server` | Nazwa instancji SQL (grupowanie) |
-| `CompatibilityLevel` | Poziom kompatybilności |
-| `SQLServerVersion` | Wersja SQL Server |
-| `State` | Stan bazy (ONLINE/OFFLINE) |
 
 ### serverList_DMZ.json
 
@@ -460,8 +410,8 @@ Lista typów logów dostępnych w zakładce Event Log.
 | Zakładka | Plik danych | Źródło danych | Częstotliwość |
 |----------|-------------|---------------|---------------|
 | Klastry Windows | `infra_ClustersWindows.json` | `clusters.json` (odpytywanie klastrów) | Co 5 min |
-| Udziały sieciowe | `infra_UdzialySieciowe.json` | `fileshare.csv` | Raz dziennie |
-| Instancje SQL | `infra_InstancjeSQL.json` | `sql_db_details.csv` | Raz dziennie |
+| Udziały sieciowe | `infra_UdzialySieciowe.json` | `clusters.json` (klastry FileShare) | Raz dziennie |
+| Instancje SQL | `infra_InstancjeSQL.json` | `clusters.json` (klastry SQL) | Raz dziennie |
 | Kolejki MQ | `infra_KolejkiMQ.json` | `mq_servers.json` (odpytywanie serwerów) | Raz dziennie |
 | Przełączenia ról | `infra_PrzelaczeniaRol.json` | `clusters.json` (Event Log klastrów) | Raz dziennie |
 
@@ -577,9 +527,9 @@ Nowa zakładka wyświetlająca historię przełączeń ról (failover/failback) 
 - Upewnij się, że plik `app-config.json` istnieje w katalogu repozytorium
 - Uruchom `Initialize-Folders.ps1` żeby utworzyć strukturę katalogów
 
-### Błąd: "Brak pliku CSV"
-- Utwórz plik `fileshare.csv` lub `sql_db_details.csv` w katalogu `config/`
-- Sprawdź format pliku (nagłówki kolumn muszą się zgadzać)
+### Błąd: "Brak pliku clusters.json"
+- Utwórz plik `clusters.json` w katalogu `config/`
+- Sprawdź format pliku (musi zawierać tablicę `clusters` z typami i serwerami)
 
 ### Błąd w logach: "BLAD: Brak pliku"
 - Sprawdź ścieżkę w logu
@@ -606,8 +556,6 @@ Jeśli używasz starej wersji bez centralnego configu:
 Stare lokalizacje → Nowe lokalizacje:
 ```
 D:\PROD_REPO_DATA\IIS\Cluster\clusters.json       → config\clusters.json
-D:\PROD_REPO_DATA\IIS\Cluster\data\fileShare.csv  → config\fileshare.csv
-D:\PROD_REPO_DATA\IIS\Cluster\data\sql_db_details.csv → config\sql_db_details.csv
 D:\PROD_REPO_DATA\IIS\prodHealtchCheck\serverList_*.txt → config\serverList_*.txt
 D:\PROD_REPO_DATA\IIS\prodHealtchCheck\ServerHealthMonitor.log → logs\ServerHealthMonitor.log
 ```
