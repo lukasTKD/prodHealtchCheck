@@ -619,13 +619,14 @@ function renderClusters(data) {
                                     ${nodeRoles.length === 0 ? '<div style="padding:15px;text-align:center;color:#999;font-size:0.85em;">Brak ról</div>' : 
                                         nodeRoles.map(role => {
                                             const isOnline = role.State === 'Online';
-                                            const isMQ = role.Name && role.Name.match(/QM\d+/);
+                                            const isMQ = role.Name && role.Name.match(/QM/i);
                                             const roleClass = isMQ ? 'role-mq' : (isOnline ? 'role-online' : 'role-offline');
-                                            
+                                            const portInfo = role.Port ? ` PORT(${role.Port})` : '';
+
                                             return `
                                                 <div class="role-item ${roleClass}">
                                                     <div class="role-name">${role.Name}</div>
-                                                    <div class="role-details">[STATUS(${role.State})]</div>
+                                                    <div class="role-details">[STATUS(${role.State})${portInfo}]</div>
                                                     ${role.IPAddresses ? `<div class="role-ip">${role.IPAddresses}</div>` : ''}
                                                 </div>
                                             `;

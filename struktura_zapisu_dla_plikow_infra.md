@@ -63,6 +63,7 @@ Nazwy plikow: `infra_` + nazwa_zakladki + `.json`
     - `State` - string (Online/Offline)
     - `OwnerNode` - string (nazwa wezla)
     - `IPAddresses` - string
+    - `Port` - string (opcjonalne, dla MQ - port nasłuchiwania)
 
 ---
 
