@@ -216,8 +216,8 @@ if ($uniqueNodes.Count -gt 0) {
                 TimeCreated = $result.TimeCreated
                 EventId     = $result.EventId
                 EventType   = $result.EventType
-                ClusterName = if ($nodeInfo) { $nodeInfo.ClusterFQDN -replace '\..*$', '' } else { "Unknown" }
-                ClusterType = if ($nodeInfo) { $nodeInfo.ClusterType } else { "Unknown" }
+                ClusterName = $(if ($nodeInfo) { $nodeInfo.ClusterFQDN -replace '\..*$', '' } else { "Unknown" })
+                ClusterType = $(if ($nodeInfo) { $nodeInfo.ClusterType } else { "Unknown" })
                 RoleName    = $result.RoleName
                 SourceNode  = $result.SourceNode
                 TargetNode  = $result.TargetNode
@@ -233,8 +233,8 @@ if ($uniqueNodes.Count -gt 0) {
                         TimeCreated = $r.TimeCreated
                         EventId     = $r.EventId
                         EventType   = $r.EventType
-                        ClusterName = if ($nodeInfo) { $nodeInfo.ClusterFQDN -replace '\..*$', '' } else { "Unknown" }
-                        ClusterType = if ($nodeInfo) { $nodeInfo.ClusterType } else { "Unknown" }
+                        ClusterName = $(if ($nodeInfo) { $nodeInfo.ClusterFQDN -replace '\..*$', '' } else { "Unknown" })
+                        ClusterType = $(if ($nodeInfo) { $nodeInfo.ClusterType } else { "Unknown" })
                         RoleName    = $r.RoleName
                         SourceNode  = $r.SourceNode
                         TargetNode  = $r.TargetNode

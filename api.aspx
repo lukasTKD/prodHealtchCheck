@@ -51,6 +51,7 @@
     {
         Response.ContentType = "application/json";
         Response.Cache.SetCacheability(HttpCacheability.NoCache);
+        Response.TrySkipIisCustomErrors = true;
 
         var paths = GetPaths();
         string action = Request.QueryString["action"];

@@ -40,13 +40,39 @@ async function loadData() {
             return;
         } else if (isInfraTab(currentGroup)) {
             const response = await fetch('api.aspx?type=infra&group=' + currentGroup + '&t=' + Date.now());
-            infraData = await response.json();
+            const text = await response.text();
+            try {
+                infraData = JSON.parse(text);
+            } catch (parseErr) {
+                infraData = null;
+                document.getElementById('serverGrid').innerHTML =
+                    '<div class="error-message">Brak danych lub blad formatu odpowiedzi (HTTP ' + response.status + ')</div>';
+                return;
+            }
             serverData = null;
+            if (infraData && infraData.error) {
+                document.getElementById('serverGrid').innerHTML =
+                    '<div class="error-message">' + infraData.error + '</div>';
+                return;
+            }
             updateInfraUI();
         } else {
             const response = await fetch('api.aspx?group=' + currentGroup + '&t=' + Date.now());
-            serverData = await response.json();
+            const text = await response.text();
+            try {
+                serverData = JSON.parse(text);
+            } catch (parseErr) {
+                serverData = null;
+                document.getElementById('serverGrid').innerHTML =
+                    '<div class="error-message">Brak danych lub blad formatu odpowiedzi (HTTP ' + response.status + ')</div>';
+                return;
+            }
             infraData = null;
+            if (serverData && serverData.error) {
+                document.getElementById('serverGrid').innerHTML =
+                    '<div class="error-message">' + serverData.error + '</div>';
+                return;
+            }
             updateUI();
         }
     } catch (error) {
@@ -1028,7 +1054,10 @@ async function checkForUpdates() {
     try {
         if (isInfraTab(currentGroup)) {
             const response = await fetch('api.aspx?type=infra&group=' + currentGroup + '&t=' + Date.now());
-            const data = await response.json();
+            const text = await response.text();
+            let data;
+            try { data = JSON.parse(text); } catch (e) { return; }
+            if (data.error) return;
             if (data.LastUpdate && infraData && data.LastUpdate !== infraData.LastUpdate) {
                 infraData = data;
                 updateInfraUI();
@@ -1038,7 +1067,10 @@ async function checkForUpdates() {
             }
         } else {
             const response = await fetch('api.aspx?group=' + currentGroup + '&t=' + Date.now());
-            const data = await response.json();
+            const text = await response.text();
+            let data;
+            try { data = JSON.parse(text); } catch (e) { return; }
+            if (data.error) return;
             if (data.LastUpdate && serverData && data.LastUpdate !== serverData.LastUpdate) {
                 serverData = data;
                 updateUI();

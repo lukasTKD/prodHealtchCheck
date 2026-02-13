@@ -74,32 +74,72 @@ if (-not $ClustersConfigPath) {
 
 Write-Log "Uzywam konfiguracji: $ClustersConfigPath"
 
-$config = Get-Content $ClustersConfigPath -Raw | ConvertFrom-Json
+try {
+    $configRaw = Get-Content $ClustersConfigPath -Raw
+    $config = $configRaw | ConvertFrom-Json
+} catch {
+    Write-Log "BLAD: Nie mozna sparsowac clusters.json - $($_.Exception.Message)"
+    exit 1
+}
+
+# Walidacja struktury konfiguracji
 $allClusters = @($config.clusters)
+Write-Log "Wczytano konfiguracje: $($allClusters.Count) grup klastrow"
 
 if ($allClusters.Count -eq 0) {
-    Write-Log "BLAD: Brak klastrow w konfiguracji"
+    Write-Log "BLAD: Brak klastrow w konfiguracji (property 'clusters' pusta lub nie istnieje)"
+    Write-Log "DEBUG: Dostepne property w config: $( ($config | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name) -join ', ' )"
     exit 1
 }
 
 # Zbierz wszystkie nazwy FQDN klastrów do jednej listy
 $clusterList = [System.Collections.ArrayList]::new()
 foreach ($cg in $allClusters) {
-    foreach ($srv in $cg.servers) {
-        [void]$clusterList.Add(@{ FQDN = $srv; Type = $cg.cluster_type })
+    $servers = @($cg.servers)
+    $ctype = $cg.cluster_type
+    Write-Log "  Grupa: typ=$ctype, serwerow=$($servers.Count)"
+    foreach ($srv in $servers) {
+        [void]$clusterList.Add(@{ FQDN = $srv; Type = $ctype })
     }
+}
+
+if ($clusterList.Count -eq 0) {
+    Write-Log "BLAD: Konfiguracja zawiera grupy klastrow ale zadna nie ma serwerow (property 'servers')"
+    Write-Log "DEBUG: Pierwszy wpis - property: $( ($allClusters[0] | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name) -join ', ' )"
+    exit 1
 }
 
 Write-Log "START zbierania statusu klastrow ($($clusterList.Count) klastrow)"
 $startTime = Get-Date
 $clusterResults = [System.Collections.ArrayList]::new()
 
-# --- Zbieranie danych z klastrów ---
-# OPTYMALIZACJA: Używamy runspace pool dla równoległego przetwarzania klastrów
-$maxThreads = [Math]::Min($clusterList.Count, 10)  # Max 10 równoległych połączeń
+# --- Upewnij się że moduł FailoverClusters jest dostępny ---
+try {
+    Import-Module FailoverClusters -ErrorAction Stop
+    Write-Log "Modul FailoverClusters zaladowany"
+} catch {
+    Write-Log "BLAD KRYTYCZNY: Nie mozna zaladowac modulu FailoverClusters - $($_.Exception.Message)"
+    Write-Log "Zainstaluj feature: Install-WindowsFeature RSAT-Clustering-PowerShell"
+    # Zapisz pusty wynik
+    @{
+        LastUpdate         = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+        CollectionDuration = 0
+        TotalClusters      = 0
+        OnlineCount        = 0
+        FailedCount        = 0
+        Clusters           = @()
+        Error              = "Modul FailoverClusters niedostepny"
+    } | ConvertTo-Json -Depth 10 | Out-File $OutputPath -Encoding UTF8 -Force
+    exit 1
+}
 
-$scriptBlock = {
-    param($clusterFQDN, $clusterType)
+# --- Zbieranie danych z klastrów (sekwencyjnie - niezawodne) ---
+Write-Log "Rozpoczynam odpytywanie $($clusterList.Count) klastrow..."
+
+foreach ($cluster in $clusterList) {
+    $clusterFQDN = $cluster.FQDN
+    $clusterType = $cluster.Type
+    Write-Log "Odpytuje klaster: $clusterFQDN (typ: $clusterType)"
 
     try {
         # Pobierz nazwę klastra
@@ -125,7 +165,7 @@ $scriptBlock = {
                 State       = $_.State.ToString()
                 NodeWeight  = $_.NodeWeight
                 DynamicWeight = $_.DynamicWeight
-                IPAddresses = if ($nodeIPs) { $nodeIPs } else { "N/A" }
+                IPAddresses = $(if ($nodeIPs) { $nodeIPs } else { "N/A" })
             }
         })
 
@@ -136,11 +176,10 @@ $scriptBlock = {
             $allResources = @(Get-ClusterResource -Cluster $clusterFQDN -ErrorAction SilentlyContinue)
         } catch {}
 
-        # OPTYMALIZACJA: Batch pobieranie parametrów IP - filtruj tylko IP Address resources
+        # Batch pobieranie parametrów IP - filtruj tylko IP Address resources
         $ipResources = @($allResources | Where-Object { $_.ResourceType -eq "IP Address" })
         $ipParams = @{}
 
-        # Użyj pipeline zamiast foreach dla lepszej wydajności
         $ipResources | ForEach-Object {
             try {
                 $addr = (Get-ClusterParameter -InputObject $_ -Name Address -ErrorAction SilentlyContinue).Value
@@ -161,11 +200,11 @@ $scriptBlock = {
                 Name        = $roleName
                 State       = $_.State.ToString()
                 OwnerNode   = $_.OwnerNode.ToString()
-                IPAddresses = if ($ipParams.ContainsKey($roleName)) { $ipParams[$roleName] } else { "" }
+                IPAddresses = $(if ($ipParams.ContainsKey($roleName)) { $ipParams[$roleName] } else { "" })
             }
         })
 
-        @{
+        $result = @{
             Success     = $true
             ClusterName = $clusterName
             FQDN        = $clusterFQDN
@@ -175,9 +214,13 @@ $scriptBlock = {
             Roles       = $roles
             Error       = $null
         }
+        Write-Log "OK: $clusterName ($clusterType) - $($nodes.Count) wezlow, $($roles.Count) rol"
+        [void]$clusterResults.Add($result)
     }
     catch {
-        @{
+        $errMsg = $_.Exception.Message
+        Write-Log "FAIL: $clusterFQDN - $errMsg"
+        [void]$clusterResults.Add(@{
             Success     = $false
             ClusterName = $clusterFQDN -replace '\..*$', ''
             FQDN        = $clusterFQDN
@@ -185,39 +228,8 @@ $scriptBlock = {
             Status      = "Error"
             Nodes       = @()
             Roles       = @()
-            Error       = $_.Exception.Message
-        }
-    }
-}
-
-# OPTYMALIZACJA: Równoległe przetwarzanie klastrów jeśli jest ich więcej niż 1
-if ($clusterList.Count -eq 1) {
-    # Jeden klaster - wykonaj synchronicznie
-    $result = & $scriptBlock -clusterFQDN $clusterList[0].FQDN -clusterType $clusterList[0].Type
-    if ($result.Success) {
-        Write-Log "OK: $($result.ClusterName) ($($result.ClusterType)) - $($result.Nodes.Count) wezlow, $($result.Roles.Count) rol"
-    } else {
-        Write-Log "FAIL: $($result.FQDN) - $($result.Error)"
-    }
-    [void]$clusterResults.Add($result)
-} else {
-    # Wiele klastrów - użyj Start-Job dla równoległości
-    $jobs = @()
-    foreach ($cluster in $clusterList) {
-        $jobs += Start-Job -ScriptBlock $scriptBlock -ArgumentList $cluster.FQDN, $cluster.Type
-    }
-
-    # Czekaj na zakończenie wszystkich zadań
-    $jobs | Wait-Job | ForEach-Object {
-        $result = Receive-Job $_
-        Remove-Job $_
-
-        if ($result.Success) {
-            Write-Log "OK: $($result.ClusterName) ($($result.ClusterType)) - $($result.Nodes.Count) wezlow, $($result.Roles.Count) rol"
-        } else {
-            Write-Log "FAIL: $($result.FQDN) - $($result.Error)"
-        }
-        [void]$clusterResults.Add($result)
+            Error       = $errMsg
+        })
     }
 }
 
