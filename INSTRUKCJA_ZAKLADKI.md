@@ -1,12 +1,181 @@
-# Instrukcja dodawania nowych zakładek
+# Instrukcja konfiguracji Server Health Monitor
 
-> **Uwaga:** Ta instrukcja dotyczy zakładek LAN. Dla serwerów DMZ zobacz sekcję "Dodawanie grupy DMZ" na końcu dokumentu.
+## Spis treści
 
-## Krok 1: Dodaj grupę do skryptu PowerShell
+1. [Struktura katalogów](#struktura-katalogów)
+2. [Centralny plik konfiguracyjny](#centralny-plik-konfiguracyjny)
+3. [Konfiguracja plików CSV](#konfiguracja-plików-csv)
+4. [Dodawanie zakładek LAN](#dodawanie-zakładek-lan)
+5. [Dodawanie grup DMZ](#dodawanie-grup-dmz)
+6. [Konfiguracja klastrów](#konfiguracja-klastrów)
+7. [Konfiguracja Event Log](#konfiguracja-event-log)
+8. [Konfiguracja MQ](#konfiguracja-mq)
+9. [Rozwiązywanie problemów](#rozwiązywanie-problemów)
 
-Edytuj plik `scripts\Collect-ServerHealth.ps1`
+---
 
-Znajdź linię z `ValidateSet` (około linii 4):
+## Struktura katalogów
+
+System używa następującej struktury katalogów:
+
+```
+D:\PROD_REPO_DATA\IIS\prodHealtchCheck\
+├── config/        # Pliki konfiguracyjne
+├── data/          # Dane JSON generowane przez skrypty
+├── logs/          # Logi skryptów
+└── EventLogs/     # Pobrane logi Windows Event Log
+```
+
+### Inicjalizacja struktury
+
+Po pierwszej instalacji lub aktualizacji uruchom:
+
+```powershell
+D:\PROD_REPO\IIS\prodHealtchCheck\scripts\Initialize-Folders.ps1
+```
+
+Skrypt:
+- Utworzy brakujące katalogi
+- Skopiuje pliki konfiguracyjne ze starych lokalizacji
+- Wyświetli listę brakujących plików do utworzenia
+
+---
+
+## Centralny plik konfiguracyjny
+
+Plik `app-config.json` w głównym katalogu repozytorium zawiera wszystkie ścieżki.
+
+### Lokalizacja
+```
+D:\PROD_REPO\IIS\prodHealtchCheck\app-config.json
+```
+
+### Struktura
+
+```json
+{
+  "paths": {
+    "basePath": "D:\\PROD_REPO_DATA\\IIS\\prodHealtchCheck",
+    "dataPath": "D:\\PROD_REPO_DATA\\IIS\\prodHealtchCheck\\data",
+    "logsPath": "D:\\PROD_REPO_DATA\\IIS\\prodHealtchCheck\\logs",
+    "configPath": "D:\\PROD_REPO_DATA\\IIS\\prodHealtchCheck\\config",
+    "eventLogsPath": "D:\\PROD_REPO_DATA\\IIS\\prodHealtchCheck\\EventLogs"
+  },
+  "scripts": {
+    "Collect-ServerHealth": {
+      "description": "Zbiera kondycję serwerów LAN",
+      "sourceFile": "serverList_{Group}.txt",
+      "destFile": "serverHealth_{Group}.json"
+    },
+    "Collect-InfraDaily": {
+      "description": "Zbiera dane infrastruktury",
+      "sources": {
+        "fileShares": "fileshare.csv",
+        "sqlInstances": "sql_db_details.csv",
+        "mqConfig": "config_mq.json"
+      },
+      "destinations": {
+        "fileShares": "infra_UdzialySieciowe.json",
+        "sqlInstances": "infra_InstancjeSQL.json",
+        "mqQueues": "infra_KolejkiMQ.json"
+      }
+    }
+  },
+  "tabs": {
+    "serverHealth": [...],
+    "infrastructure": [...],
+    "logs": [...]
+  }
+}
+```
+
+### Zmiana ścieżek
+
+1. Edytuj `app-config.json`
+2. Zmień wartości w sekcji `paths`
+3. Uruchom `Initialize-Folders.ps1` żeby utworzyć nowe katalogi
+4. Przenieś pliki do nowych lokalizacji
+
+---
+
+## Konfiguracja plików CSV
+
+Zakładki "Udziały sieciowe" i "Instancje SQL" czytają dane z plików CSV zamiast odpytywać serwery.
+
+### fileshare.csv (Udziały sieciowe)
+
+**Lokalizacja:** `D:\PROD_REPO_DATA\IIS\prodHealtchCheck\config\fileshare.csv`
+
+**Format:**
+```csv
+ShareName,SharePath,ShareState,ShareClusterRole
+```
+
+**Przykład:**
+```csv
+ShareName,SharePath,ShareState,ShareClusterRole
+Backup,D:\Backup,Online,FileServer1
+Public,E:\Public,Online,FileServer1
+Archive,F:\Archive,Online,FileServer2
+Users,G:\Users,Online,FileServer2
+```
+
+**Kolumny:**
+| Kolumna | Wymagana | Opis |
+|---------|----------|------|
+| `ShareName` | Tak | Nazwa udziału sieciowego |
+| `SharePath` | Tak | Ścieżka lokalna na serwerze |
+| `ShareState` | Nie | Stan udziału (domyślnie: Online) |
+| `ShareClusterRole` | Tak | Nazwa serwera/roli (używana do grupowania) |
+
+### sql_db_details.csv (Instancje SQL)
+
+**Lokalizacja:** `D:\PROD_REPO_DATA\IIS\prodHealtchCheck\config\sql_db_details.csv`
+
+**Format:**
+```csv
+DatabaseName,sql_server,CompatibilityLevel,SQLServerVersion,State
+```
+
+**Przykład:**
+```csv
+DatabaseName,sql_server,CompatibilityLevel,SQLServerVersion,State
+master,SQLSERVER1,150,15.0.4312.2,ONLINE
+tempdb,SQLSERVER1,150,15.0.4312.2,ONLINE
+mydb,SQLSERVER1,140,15.0.4312.2,ONLINE
+master,SQLSERVER2,150,15.0.4312.2,ONLINE
+appdb,SQLSERVER2,150,15.0.4312.2,ONLINE
+```
+
+**Kolumny:**
+| Kolumna | Wymagana | Opis |
+|---------|----------|------|
+| `DatabaseName` | Tak | Nazwa bazy danych |
+| `sql_server` | Tak | Nazwa instancji SQL (używana do grupowania) |
+| `CompatibilityLevel` | Nie | Poziom kompatybilności (np. 150 = SQL 2019) |
+| `SQLServerVersion` | Nie | Pełna wersja SQL Server |
+| `State` | Nie | Stan bazy (domyślnie: ONLINE) |
+
+### Aktualizacja danych CSV
+
+Po edycji plików CSV uruchom:
+```powershell
+D:\PROD_REPO\IIS\prodHealtchCheck\scripts\Collect-InfraDaily.ps1
+```
+
+Dane zostaną przetworzone i zapisane do odpowiednich plików JSON w `data/`.
+
+---
+
+## Dodawanie zakładek LAN
+
+> **Uwaga:** Ta sekcja dotyczy zakładek kondycji serwerów LAN. Dla DMZ zobacz [Dodawanie grup DMZ](#dodawanie-grup-dmz).
+
+### Krok 1: Dodaj grupę do skryptu PowerShell
+
+Edytuj `scripts\Collect-ServerHealth.ps1`
+
+Znajdź linię z `ValidateSet`:
 ```powershell
 [ValidateSet("DCI", "Ferryt", "MarketPlanet", "MQ", "FileTransfer", "Klastry")]
 ```
@@ -16,9 +185,9 @@ Dodaj nową grupę:
 [ValidateSet("DCI", "Ferryt", "MarketPlanet", "MQ", "FileTransfer", "Klastry", "NowaGrupa")]
 ```
 
-## Krok 2: Dodaj grupę do skryptu zbiorczego
+### Krok 2: Dodaj grupę do skryptu zbiorczego
 
-Edytuj plik `scripts\Collect-AllGroups.ps1`
+Edytuj `scripts\Collect-AllGroups.ps1`
 
 Znajdź tablicę `$Groups`:
 ```powershell
@@ -30,15 +199,14 @@ Dodaj nową grupę:
 $Groups = @("DCI", "Ferryt", "MarketPlanet", "MQ", "FileTransfer", "Klastry", "NowaGrupa")
 ```
 
-## Krok 3: Dodaj zakładkę w HTML
+### Krok 3: Dodaj zakładkę w HTML
 
-Edytuj plik `index.html`
+Edytuj `index.html`
 
-Znajdź sekcję z zakładkami (około linii 289-296):
+Znajdź sekcję z zakładkami "Kondycja serwerów":
 ```html
 <div class="tabs">
     <button class="tab active" data-group="DCI" onclick="switchTab('DCI')">DCI</button>
-    <button class="tab" data-group="Ferryt" onclick="switchTab('Ferryt')">Ferryt</button>
     ...
 </div>
 ```
@@ -48,11 +216,10 @@ Dodaj nową zakładkę:
 <button class="tab" data-group="NowaGrupa" onclick="switchTab('NowaGrupa')">NowaGrupa</button>
 ```
 
-## Krok 4: Utwórz plik z listą serwerów
+### Krok 4: Utwórz plik z listą serwerów
 
-Utwórz plik `D:\PROD_REPO_DATA\IIS\prodHealtchCheck\serverList_NowaGrupa.txt`
+Utwórz plik: `D:\PROD_REPO_DATA\IIS\prodHealtchCheck\config\serverList_NowaGrupa.txt`
 
-Zawartość:
 ```
 # Lista serwerów dla grupy: NowaGrupa
 SERVER1
@@ -60,68 +227,32 @@ SERVER2
 SERVER3
 ```
 
-## Krok 5: Uruchom zbieranie danych
+### Krok 5: Uruchom zbieranie danych
 
 ```powershell
 .\scripts\Collect-ServerHealth.ps1 -Group NowaGrupa
-```
-
-Lub dla wszystkich grup:
-```powershell
+# lub
 .\scripts\Collect-AllGroups.ps1
 ```
 
-## Krok 6: Odśwież stronę
-
-Otwórz stronę w przeglądarce - nowa zakładka powinna być widoczna.
-
----
-
-## Podsumowanie zmian
+### Podsumowanie zmian
 
 | Plik | Co zmienić |
 |------|------------|
 | `scripts\Collect-ServerHealth.ps1` | Dodaj do `ValidateSet` |
 | `scripts\Collect-AllGroups.ps1` | Dodaj do tablicy `$Groups` |
 | `index.html` | Dodaj `<button class="tab">` |
-| `serverList_NowaGrupa.txt` | Utwórz nowy plik z listą serwerów |
-
-## Przykład: Dodanie grupy "Bazy"
-
-1. **Collect-ServerHealth.ps1:**
-   ```powershell
-   [ValidateSet("DCI", "Ferryt", "MarketPlanet", "MQ", "FileTransfer", "Klastry", "Bazy")]
-   ```
-
-2. **Collect-AllGroups.ps1:**
-   ```powershell
-   $Groups = @("DCI", "Ferryt", "MarketPlanet", "MQ", "FileTransfer", "Klastry", "Bazy")
-   ```
-
-3. **index.html:**
-   ```html
-   <button class="tab" data-group="Bazy" onclick="switchTab('Bazy')">Bazy</button>
-   ```
-
-4. **Utwórz plik:**
-   ```
-   D:\PROD_REPO_DATA\IIS\prodHealtchCheck\serverList_Bazy.txt
-   ```
-
-5. **Uruchom:**
-   ```powershell
-   .\scripts\Collect-AllGroups.ps1
-   ```
+| `config\serverList_NowaGrupa.txt` | Utwórz nowy plik z listą serwerów |
 
 ---
 
-# Dodawanie grupy DMZ
+## Dodawanie grup DMZ
 
-Serwery w strefie DMZ wymagają osobnej konfiguracji z uwierzytelnieniem SSL/Negotiate.
+Serwery w strefie DMZ wymagają uwierzytelnienia SSL/Negotiate.
 
-## Krok 1: Zaszyfruj hasło
+### Krok 1: Zaszyfruj hasło
 
-Uruchom w PowerShell ISE:
+Uruchom w PowerShell:
 ```powershell
 .\scripts\Encrypt-Password.ps1
 ```
@@ -131,17 +262,16 @@ Uruchom w PowerShell ISE:
 
 > **WAŻNE:** Hasło musi być zaszyfrowane na tym samym komputerze i przez tego samego użytkownika Windows, który będzie uruchamiał skrypt!
 
-## Krok 2: Dodaj grupę do serverList_DMZ.json
+### Krok 2: Edytuj serverList_DMZ.json
 
-Edytuj plik `D:\PROD_REPO_DATA\IIS\prodHealtchCheck\serverList_DMZ.json`
+**Lokalizacja:** `D:\PROD_REPO_DATA\IIS\prodHealtchCheck\config\serverList_DMZ.json`
 
-Dodaj nowy obiekt w tablicy `groups`:
 ```json
 {
     "groups": [
         {
             "name": "Istniejaca Grupa",
-            "login": "svc_existing",
+            "login": "DOMAIN\\svc_existing",
             "password": "...",
             "servers": ["192.168.1.10"]
         },
@@ -158,20 +288,27 @@ Dodaj nowy obiekt w tablicy `groups`:
 }
 ```
 
-## Krok 3: Uruchom zbieranie
+**Pola:**
+| Pole | Opis |
+|------|------|
+| `name` | Nazwa grupy wyświetlana jako badge przy serwerze |
+| `login` | Login do serwerów (format: `DOMAIN\username`) |
+| `password` | Hasło zaszyfrowane przez `Encrypt-Password.ps1` |
+| `servers` | Lista adresów IP serwerów |
+
+### Krok 3: Uruchom zbieranie
 
 ```powershell
 .\scripts\Collect-ServerHealth-DMZ.ps1
+# lub
+.\scripts\Collect-AllGroups.ps1
 ```
 
-## Krok 4: Sprawdź wyniki
+### Krok 4: Sprawdź wyniki
 
-- Otwórz zakładkę **DMZ** w przeglądarce
-- Nowa grupa pojawi się jako badge przy nazwie serwera
+Otwórz zakładkę **DMZ** w przeglądarce. Nowa grupa pojawi się jako badge przy nazwie serwera.
 
----
-
-## Podsumowanie: LAN vs DMZ
+### Podsumowanie: LAN vs DMZ
 
 | Cecha | LAN | DMZ |
 |-------|-----|-----|
@@ -182,137 +319,127 @@ Dodaj nowy obiekt w tablicy `groups`:
 | Skrypt | `Collect-ServerHealth.ps1` | `Collect-ServerHealth-DMZ.ps1` |
 | Zakładka | Osobna dla każdej grupy | Jedna zakładka DMZ dla wszystkich grup |
 
-## Struktura serverList_DMZ.json
+---
+
+## Konfiguracja klastrów
+
+Plik `clusters.json` jest używany przez:
+- `Collect-ClusterStatus.ps1` — pobiera węzły i role (co 5 min)
+- `Collect-ClusterRoleSwitches.ps1` — pobiera historię przełączeń (raz dziennie)
+
+### Lokalizacja
+```
+D:\PROD_REPO_DATA\IIS\prodHealtchCheck\config\clusters.json
+```
+
+### Format
 
 ```json
 {
-    "groups": [
+    "clusters": [
         {
-            "name": "string",      // Nazwa wyświetlana w UI
-            "login": "string",     // Login (DOMAIN\\user lub user)
-            "password": "string",  // Hasło zaszyfrowane DPAPI
-            "servers": [           // Lista adresów IP
-                "192.168.1.10",
-                "192.168.1.11"
-            ]
+            "cluster_type": "SQL",
+            "servers": ["sqlcluster1.domain.pl", "sqlcluster2.domain.pl"]
+        },
+        {
+            "cluster_type": "FileShare",
+            "servers": ["fscluster1.domain.pl"]
+        },
+        {
+            "cluster_type": "MQ",
+            "servers": ["mqcluster1.domain.pl"]
         }
     ]
 }
 ```
 
+**Pola:**
+| Pole | Opis |
+|------|------|
+| `cluster_type` | Typ klastra: `SQL`, `FileShare`, `MQ` (używany do kolorowania w UI) |
+| `servers` | Lista nazw FQDN lub NetBIOS klastrów |
+
+### Typy klastrów
+
+| Typ | Kolor w UI | Opis |
+|-----|-----------|------|
+| `SQL` | Niebieski | Klastry SQL Server |
+| `FileShare` | Zielony | Klastry udziałów plików |
+| `MQ` | Pomarańczowy | Klastry IBM MQ |
+
+### Dodawanie klastra
+
+1. Edytuj `clusters.json`
+2. Dodaj nowy obiekt do tablicy `clusters`
+3. Uruchom:
+   ```powershell
+   .\scripts\Collect-ClusterStatus.ps1
+   .\scripts\Collect-ClusterRoleSwitches.ps1
+   ```
+
 ---
 
-# Dodawanie typów logów w zakładce Event Log
+## Konfiguracja Event Log
 
 Zakładka **Event Log** pozwala przeglądać Windows Event Log z dowolnych serwerów.
-Lista dostępnych typów logów (widoczna w menu "Typ logów") jest konfigurowana
-w zewnętrznym pliku JSON.
 
-## Plik konfiguracji
+### Plik konfiguracji typów logów
 
-```
-D:\PROD_REPO_DATA\IIS\prodHealtchCheck\EventLogsConfig.json
-```
+**Lokalizacja:** `D:\PROD_REPO_DATA\IIS\prodHealtchCheck\config\EventLogsConfig.json`
 
-## Format pliku
-
-Plik zawiera tablicę JSON obiektów z dwoma polami:
+### Format
 
 ```json
 [
-    {
-        "name": "Application",
-        "displayName": "Application"
-    },
-    {
-        "name": "System",
-        "displayName": "System"
-    }
+    {"name": "Application", "displayName": "Application"},
+    {"name": "System", "displayName": "System"},
+    {"name": "Security", "displayName": "Security"},
+    {"name": "Microsoft-Windows-TaskScheduler/Operational", "displayName": "Task Scheduler"}
 ]
 ```
 
+**Pola:**
 | Pole | Opis |
 |------|------|
-| `name` | Techniczna nazwa logu Windows (przekazywana do `Get-WinEvent -LogName`) |
-| `displayName` | Nazwa wyświetlana w rozwijanej liście na stronie |
+| `name` | Techniczna nazwa logu Windows (dla `Get-WinEvent -LogName`) |
+| `displayName` | Nazwa wyświetlana w liście rozwijanej |
 
-## Jak dodać nowy typ logów
+### Jak znaleźć nazwę logu
 
-### Krok 1: Sprawdź nazwę logu Windows
-
-Na docelowym serwerze uruchom PowerShell:
+Na docelowym serwerze uruchom:
 ```powershell
-# Wyświetl wszystkie dostępne logi:
+# Wszystkie logi:
 Get-WinEvent -ListLog * | Select-Object LogName | Sort-Object LogName
 
-# Szukaj konkretnego logu:
+# Szukaj konkretnego:
 Get-WinEvent -ListLog *IIS* | Select-Object LogName
 ```
 
-Przykładowe nazwy logów:
+### Przykładowe nazwy logów
+
 | Nazwa logu | Opis |
 |------------|------|
 | `Application` | Logi aplikacji |
 | `System` | Logi systemowe |
-| `Security` | Logi zabezpieczeń |
+| `Security` | Logi zabezpieczeń (wymaga uprawnień) |
 | `Microsoft-Windows-IIS-Configuration/Operational` | Konfiguracja IIS |
 | `Microsoft-Windows-TerminalServices-LocalSessionManager/Operational` | Logowania RDP |
 | `Microsoft-Windows-Windows Defender/Operational` | Windows Defender |
-| `Microsoft-Windows-TaskScheduler/Operational` | Task Scheduler |
 | `Microsoft-Windows-PowerShell/Operational` | PowerShell |
 
-### Krok 2: Edytuj plik konfiguracji
+### Dodawanie nowego typu
 
-Otwórz plik:
-```
-D:\PROD_REPO_DATA\IIS\prodHealtchCheck\EventLogsConfig.json
-```
-
-Dodaj nowy obiekt na końcu tablicy (przed zamykającym `]`):
-```json
-[
-    {
-        "name": "Application",
-        "displayName": "Application"
-    },
-    {
-        "name": "System",
-        "displayName": "System"
-    },
-    {
-        "name": "Microsoft-Windows-IIS-Configuration/Operational",
-        "displayName": "IIS Configuration"
-    }
-]
-```
-
-> **UWAGA:** Upewnij się, że JSON jest poprawny — przecinki między obiektami, brak przecinka po ostatnim.
-
-### Krok 3: Odśwież stronę
-
-Odśwież stronę w przeglądarce (F5). Nowy typ logów pojawi się w liście rozwijanej "Typ logów".
-
-> Nie trzeba restartować IIS ani żadnej usługi — plik jest czytany przy każdym żądaniu.
-
-## Przykład: Dodanie logów RDP
-
-1. Sprawdź nazwę:
-   ```powershell
-   Get-WinEvent -ListLog *Terminal* | Select-Object LogName
-   ```
-   Wynik: `Microsoft-Windows-TerminalServices-LocalSessionManager/Operational`
-
-2. Edytuj `EventLogsConfig.json` — dodaj:
+1. Edytuj `EventLogsConfig.json`
+2. Dodaj nowy obiekt na końcu tablicy:
    ```json
    {
        "name": "Microsoft-Windows-TerminalServices-LocalSessionManager/Operational",
        "displayName": "Logowania RDP"
    }
    ```
+3. Odśwież stronę (F5) — nie trzeba restartować IIS
 
-3. Odśwież stronę — "Logowania RDP" pojawi się w liście.
-
-## Zapis pobranych logów
+### Zapis pobranych logów
 
 Pobrane logi są automatycznie zapisywane do:
 ```
@@ -324,29 +451,127 @@ Format nazwy pliku:
 SERWER_TypLogu_RRRRMMDD_GGMMSS.json
 ```
 
-Przykład: `SERVER01_Application_20260212_143000.json`
+---
 
-> Zapis jest opcjonalny — błędy zapisu nie wpływają na wyświetlanie logów.
+## Konfiguracja MQ
 
-## Wieloużytkownikowość
+Serwery IBM MQ są odpytywane zdalnie przez skrypt `Collect-InfraDaily.ps1`.
 
-Zakładka Event Log jest zaprojektowana dla wielu jednoczesnych użytkowników:
-- Każda przeglądarka ma własny, izolowany stan (dane, filtr, sortowanie, wybrany serwer)
-- Backend jest bezstanowy (stateless HTTP) — żądania nie wpływają na siebie
-- Brak współdzielonego cache'u ani sesji
-- Brak auto-odświeżania — każdy użytkownik sam decyduje kiedy pobrać logi
+### Plik konfiguracji
 
-## Rozwiązywanie problemów DMZ
+**Lokalizacja:** `D:\PROD_REPO_DATA\IIS\prodHealtchCheck\config\config_mq.json`
 
-### Błąd: "Nie można odszyfrować hasła"
-- Hasło zostało zaszyfrowane na innym komputerze lub przez innego użytkownika
-- **Rozwiązanie:** Uruchom `Encrypt-Password.ps1` na maszynie docelowej i zaktualizuj JSON
+### Format
 
-### Błąd: "Timeout/Niedostępny"
-- Serwer nie odpowiada na port 5986 (WinRM HTTPS)
-- **Sprawdź:** `Test-NetConnection -ComputerName IP -Port 5986`
-- **Sprawdź:** czy WinRM over HTTPS jest skonfigurowany na serwerze DMZ
+```json
+{
+    "servers": [
+        {"name": "mqserver1", "description": "MQ Produkcja"},
+        {"name": "mqserver2", "description": "MQ Test"},
+        {"name": "mqserver3.domain.pl", "description": "MQ DR"}
+    ]
+}
+```
 
-### Błąd: "Access Denied"
-- Nieprawidłowy login lub hasło
-- Konto nie ma uprawnień do WinRM na serwerze docelowym
+**Pola:**
+| Pole | Opis |
+|------|------|
+| `name` | Nazwa serwera (NetBIOS lub FQDN) |
+| `description` | Opis wyświetlany w UI |
+
+### Wymagania
+
+- Serwery muszą mieć zainstalowane IBM MQ
+- PowerShell Remoting musi być włączony
+- Konto uruchamiające skrypt musi mieć dostęp do serwerów
+
+### Zbierane dane
+
+- Queue Managery (status, port listenera)
+- Kolejki lokalne (głębokość, max głębokość)
+- Kolejki systemowe (`SYSTEM.*`) są pomijane
+
+---
+
+## Rozwiązywanie problemów
+
+### "Brak pliku konfiguracji"
+
+**Problem:** Skrypt nie może znaleźć `app-config.json`
+
+**Rozwiązanie:**
+1. Sprawdź czy plik istnieje: `D:\PROD_REPO\IIS\prodHealtchCheck\app-config.json`
+2. Jeśli nie, skopiuj z repozytorium lub utwórz ręcznie
+
+### "Brak pliku serverList_*.txt"
+
+**Problem:** Brak listy serwerów dla grupy
+
+**Rozwiązanie:**
+1. Utwórz plik w `config\serverList_GRUPA.txt`
+2. Dodaj nazwy serwerów (każdy w nowej linii)
+
+### "Nie można odszyfrować hasła" (DMZ)
+
+**Problem:** Hasło DPAPI nie działa
+
+**Przyczyna:** Hasło zostało zaszyfrowane na innym komputerze lub przez innego użytkownika
+
+**Rozwiązanie:**
+1. Uruchom `Encrypt-Password.ps1` na maszynie docelowej
+2. Zaktualizuj `serverList_DMZ.json` nowym hasłem
+
+### "Timeout/Niedostępny" (DMZ)
+
+**Problem:** Serwer DMZ nie odpowiada
+
+**Sprawdź:**
+```powershell
+# Test portu 5986 (WinRM HTTPS)
+Test-NetConnection -ComputerName IP -Port 5986
+
+# Sprawdź konfigurację WinRM
+winrm get winrm/config/client
+```
+
+**Rozwiązanie:**
+- Włącz WinRM over HTTPS na serwerze DMZ
+- Sprawdź firewall (port 5986)
+
+### "Brak danych" w zakładce
+
+**Problem:** Zakładka pokazuje "Brak danych" lub błąd
+
+**Rozwiązanie:**
+1. Uruchom odpowiedni skrypt:
+   - Kondycja serwerów: `Collect-AllGroups.ps1`
+   - Infrastruktura: `Collect-InfraDaily.ps1`
+   - Przełączenia ról: `Collect-ClusterRoleSwitches.ps1`
+2. Sprawdź logi: `logs\ServerHealthMonitor.log`
+3. Sprawdź czy plik JSON istnieje w `data\`
+
+### Błąd JSON w Event Log
+
+**Problem:** "Bad escaped character in JSON"
+
+**Przyczyna:** Logi zawierają znaki kontrolne lub nieprawidłowe
+
+**Rozwiązanie:** Zaktualizuj `GetLogs.ps1` do najnowszej wersji (zawiera escape znaków kontrolnych)
+
+### Logi nie są widoczne
+
+**Problem:** W `Collect-AllGroups.ps1` nie widać uruchomienia innych skryptów
+
+**Rozwiązanie:**
+1. Zaktualizuj `Collect-AllGroups.ps1` do najnowszej wersji
+2. Sprawdź plik logu: `logs\ServerHealthMonitor.log`
+3. Każde uruchomienie powinno być logowane z try/catch
+
+### Stare ścieżki po aktualizacji
+
+**Problem:** Skrypty szukają plików w starych lokalizacjach
+
+**Rozwiązanie:**
+1. Uruchom `Initialize-Folders.ps1`
+2. Przenieś pliki do nowych lokalizacji
+3. Sprawdź czy `app-config.json` ma poprawne ścieżki
