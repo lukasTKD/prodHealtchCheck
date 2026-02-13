@@ -97,10 +97,13 @@ if (Test-Path $FileShareCSVPath) {
         foreach ($group in $grouped) {
             $serverName = $group.Name
             $shares = @($group.Group | ForEach-Object {
+                # ShareState: 1 = Online, inne = Offline
+                $stateRaw = $_.ShareState
+                $stateText = if ($stateRaw -eq '1' -or $stateRaw -eq 'Online' -or $stateRaw -eq 'True') { 'Online' } else { 'Offline' }
                 @{
                     ShareName  = $_.ShareName
                     SharePath  = $_.SharePath
-                    ShareState = if ($_.ShareState) { $_.ShareState } else { "Online" }
+                    ShareState = $stateText
                 }
             })
 
@@ -158,18 +161,27 @@ if (Test-Path $SQLDetailsCSVPath) {
             $databases = @($group.Group | ForEach-Object {
                 @{
                     DatabaseName       = $_.DatabaseName
-                    State              = if ($_.State) { $_.State } else { "ONLINE" }
-                    CompatibilityLevel = if ($_.CompatibilityLevel) { [int]$_.CompatibilityLevel } else { 0 }
+                    State              = $(if ($_.State) { $_.State } else { "ONLINE" })
+                    CompatibilityLevel = $(if ($_.CompatibilityLevel) { [int]$_.CompatibilityLevel } else { 0 })
+                    DataFileLocation   = $(if ($_.DataFileLocation) { $_.DataFileLocation } else { '' })
+                    DataFileSizeMB     = $(if ($_.DataFileSizeMB) { [math]::Round([double]$_.DataFileSizeMB, 0) } else { 0 })
+                    LogFileLocation    = $(if ($_.LogFileLocation) { $_.LogFileLocation } else { '' })
+                    LogFileSizeMB      = $(if ($_.LogFileSizeMB) { [math]::Round([double]$_.LogFileSizeMB, 0) } else { 0 })
+                    TotalSizeMB        = $(if ($_.TotalSizeMB) { [math]::Round([double]$_.TotalSizeMB, 0) } else { 0 })
                 }
             })
 
+            # Oblicz laczny rozmiar wszystkich baz na tym serwerze
+            $totalServerSizeMB = ($databases | Measure-Object -Property TotalSizeMB -Sum).Sum
+
             [void]$sqlResults.Add(@{
-                ServerName    = $serverName
-                SQLVersion    = $sqlVersion
-                Edition       = $edition
-                DatabaseCount = $databases.Count
-                Databases     = $databases
-                Error         = $null
+                ServerName      = $serverName
+                SQLVersion      = $sqlVersion
+                Edition         = $edition
+                DatabaseCount   = $databases.Count
+                TotalSizeMB     = [math]::Round($totalServerSizeMB, 0)
+                Databases       = $databases
+                Error           = $null
             })
             Write-Log "OK SQL (CSV): $serverName ($($databases.Count) baz)"
         }

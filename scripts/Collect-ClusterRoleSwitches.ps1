@@ -78,35 +78,43 @@ if (-not $ClustersConfigPath) {
 
 Write-Log "Uzywam konfiguracji: $ClustersConfigPath"
 
-$config = Get-Content $ClustersConfigPath -Raw | ConvertFrom-Json
-$allClusters = @($config.clusters)
+try {
+    $config = Get-Content $ClustersConfigPath -Raw | ConvertFrom-Json
+} catch {
+    Write-Log "BLAD: Nie mozna sparsowac clusters.json - $($_.Exception.Message)"
+    exit 1
+}
 
-if ($allClusters.Count -eq 0) {
-    Write-Log "BLAD: Brak klastrow w konfiguracji"
+# Plik uzywa "clusterNames" (plaska tablica nazw klastrow)
+$clusterNames = @($config.clusterNames)
+Write-Log "Wczytano konfiguracje: $($clusterNames.Count) klastrow"
+
+if ($clusterNames.Count -eq 0) {
+    Write-Log "BLAD: Brak klastrow w konfiguracji (property 'clusterNames' pusta lub nie istnieje)"
+    Write-Log "DEBUG: Dostepne property w config: $( ($config | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name) -join ', ' )"
     exit 1
 }
 
 # Zbierz wszystkie węzły klastrów
 $clusterNodes = [System.Collections.ArrayList]::new()
-foreach ($cg in $allClusters) {
-    foreach ($srv in $cg.servers) {
-        # Pobierz węzły klastra
-        try {
-            $nodes = @(Get-ClusterNode -Cluster $srv -ErrorAction Stop | Select-Object -ExpandProperty Name)
-            foreach ($node in $nodes) {
-                [void]$clusterNodes.Add(@{
-                    ClusterFQDN = $srv
-                    ClusterType = $cg.cluster_type
-                    NodeName    = $node
-                })
-            }
-        } catch {
-            Write-Log "WARN: Nie mozna pobrac wezlow klastra $srv - $($_.Exception.Message)"
+foreach ($clusterName in $clusterNames) {
+    Write-Log "Pobieranie wezlow klastra: $clusterName"
+    try {
+        $nodes = @(Get-ClusterNode -Cluster $clusterName -ErrorAction Stop | Select-Object -ExpandProperty Name)
+        foreach ($node in $nodes) {
+            [void]$clusterNodes.Add(@{
+                ClusterFQDN = $clusterName
+                ClusterType = 'Windows'
+                NodeName    = $node
+            })
         }
+        Write-Log "  OK: $clusterName - $($nodes.Count) wezlow"
+    } catch {
+        Write-Log "WARN: Nie mozna pobrac wezlow klastra $clusterName - $($_.Exception.Message)"
     }
 }
 
-Write-Log "START zbierania przelaczen rol ($($clusterNodes.Count) wezlow z $($allClusters.Count) klastrow)"
+Write-Log "START zbierania przelaczen rol ($($clusterNodes.Count) wezlow z $($clusterNames.Count) klastrow)"
 $startTime = Get-Date
 
 # Event IDs dla przełączeń ról w klastrze Windows:

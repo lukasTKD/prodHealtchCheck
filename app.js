@@ -534,9 +534,10 @@ function updateInfraUI() {
         document.getElementById('criticalServers').textContent = '-';
     } else if (currentGroup === 'InstancjeSQL') {
         const totalDBs = (infraData.Instances || []).reduce((sum, s) => sum + (s.DatabaseCount || 0), 0);
+        const totalSizeGB = ((infraData.Instances || []).reduce((sum, s) => sum + (s.TotalSizeMB || 0), 0) / 1024).toFixed(1);
         document.getElementById('totalServers').textContent = infraData.TotalInstances || 0;
-        document.getElementById('successServers').textContent = totalDBs;
-        document.getElementById('failedServers').textContent = (infraData.Instances || []).filter(s => s.Error).length;
+        document.getElementById('successServers').textContent = totalDBs + ' baz';
+        document.getElementById('failedServers').textContent = totalSizeGB + ' GB';
         document.getElementById('criticalServers').textContent = '-';
     } else if (currentGroup === 'KolejkiMQ') {
         document.getElementById('totalServers').textContent = infraData.TotalServers || 0;
@@ -674,6 +675,7 @@ function renderSQLInstances(data) {
     if (instances.length === 0) { grid.innerHTML = '<div class="loading">Brak danych o instancjach SQL</div>'; return; }
 
     grid.innerHTML = instances.map(inst => {
+        const totalSizeGB = inst.TotalSizeMB ? (inst.TotalSizeMB / 1024).toFixed(1) : '0';
         return `
         <div class="server-card ${inst.Error ? 'error' : ''}" data-server="${inst.ServerName}">
             <div class="server-name">${inst.ServerName}</div>
@@ -681,16 +683,19 @@ function renderSQLInstances(data) {
             <div class="metrics-grid" style="margin-bottom:12px">
                 <div class="metric"><div class="metric-label">Wersja SQL</div><div class="metric-value" style="font-size:0.85em">${inst.SQLVersion || 'N/A'}</div></div>
                 <div class="metric"><div class="metric-label">Ilość baz</div><div class="metric-value">${inst.DatabaseCount || 0}</div></div>
+                <div class="metric"><div class="metric-label">Łączny rozmiar</div><div class="metric-value">${totalSizeGB} GB</div></div>
             </div>
             <div class="section">
                 <div class="section-title collapsible" onclick="toggleSection(this)">Bazy danych (${inst.DatabaseCount || 0})</div>
                 <div class="collapsible-content"><div class="infra-table"><table>
-                    <thead><tr><th>Baza</th><th>Stan</th><th>Compat. Level</th></tr></thead>
+                    <thead><tr><th>Baza</th><th>Compat.</th><th>Data (MB)</th><th>Log (MB)</th><th>Razem (MB)</th></tr></thead>
                     <tbody>${(inst.Databases || []).map(db => `
-                        <tr class="${db.State !== 'ONLINE' ? 'row-error' : ''}">
+                        <tr>
                             <td><strong>${db.DatabaseName}</strong></td>
-                            <td><span class="status-badge ${db.State === 'ONLINE' ? 'status-on' : 'status-off'}">${db.State}</span></td>
-                            <td>${db.CompatibilityLevel}</td>
+                            <td>${db.CompatibilityLevel || ''}</td>
+                            <td>${db.DataFileSizeMB || 0}</td>
+                            <td>${db.LogFileSizeMB || 0}</td>
+                            <td><strong>${db.TotalSizeMB || 0}</strong></td>
                         </tr>`).join('')}
                     </tbody>
                 </table></div></div>

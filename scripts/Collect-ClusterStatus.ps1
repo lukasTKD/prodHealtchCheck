@@ -82,32 +82,24 @@ try {
     exit 1
 }
 
-# Walidacja struktury konfiguracji
-$allClusters = @($config.clusters)
-Write-Log "Wczytano konfiguracje: $($allClusters.Count) grup klastrow"
+# Walidacja struktury konfiguracji - plik uzywa "clusterNames" (plaska tablica nazw klastrow)
+$clusterNames = @($config.clusterNames)
+Write-Log "Wczytano konfiguracje: $($clusterNames.Count) klastrow"
+Write-Log "DEBUG: Dostepne property w config: $( ($config | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name) -join ', ' )"
 
-if ($allClusters.Count -eq 0) {
-    Write-Log "BLAD: Brak klastrow w konfiguracji (property 'clusters' pusta lub nie istnieje)"
-    Write-Log "DEBUG: Dostepne property w config: $( ($config | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name) -join ', ' )"
+if ($clusterNames.Count -eq 0) {
+    Write-Log "BLAD: Brak klastrow w konfiguracji (property 'clusterNames' pusta lub nie istnieje)"
     exit 1
 }
 
-# Zbierz wszystkie nazwy FQDN klastrów do jednej listy
+# Zbierz liste klastrow
 $clusterList = [System.Collections.ArrayList]::new()
-foreach ($cg in $allClusters) {
-    $servers = @($cg.servers)
-    $ctype = $cg.cluster_type
-    Write-Log "  Grupa: typ=$ctype, serwerow=$($servers.Count)"
-    foreach ($srv in $servers) {
-        [void]$clusterList.Add(@{ FQDN = $srv; Type = $ctype })
-    }
+foreach ($name in $clusterNames) {
+    Write-Log "  Klaster: $name"
+    [void]$clusterList.Add(@{ FQDN = $name; Type = 'Windows' })
 }
 
-if ($clusterList.Count -eq 0) {
-    Write-Log "BLAD: Konfiguracja zawiera grupy klastrow ale zadna nie ma serwerow (property 'servers')"
-    Write-Log "DEBUG: Pierwszy wpis - property: $( ($allClusters[0] | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name) -join ', ' )"
-    exit 1
-}
+Write-Log "Laczna liczba klastrow do odpytania: $($clusterList.Count)"
 
 Write-Log "START zbierania statusu klastrow ($($clusterList.Count) klastrow)"
 $startTime = Get-Date
