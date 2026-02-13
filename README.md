@@ -84,7 +84,7 @@ D:\PROD_REPO_DATA\IIS\prodHealtchCheck\
 │   ├── serverList_FileTransfer.txt
 │   ├── serverList_Klastry.txt
 │   ├── serverList_DMZ.json              # Konfiguracja DMZ (JSON z grupami)
-│   ├── config_mq.json                   # Konfiguracja kolejek MQ
+│   ├── mq_servers.json                  # Konfiguracja serwerów MQ (klastry + serwery)
 │   ├── EventLogsConfig.json             # Typy logów Event Log
 │   ├── fileshare.csv                    # Dane udziałów sieciowych
 │   └── sql_db_details.csv               # Dane instancji SQL
@@ -191,10 +191,18 @@ SERVER3
 #### clusters.json (konfiguracja klastrów)
 ```json
 {
-    "clusters": [
-        {"cluster_type": "SQL", "servers": ["sqlcluster1.domain.pl"]},
-        {"cluster_type": "FileShare", "servers": ["fscluster1.domain.pl"]}
+    "clusterNames": [
+        "sqlcluster1.domain.pl",
+        "fscluster1.domain.pl"
     ]
+}
+```
+
+#### mq_servers.json (konfiguracja serwerów MQ)
+```json
+{
+    "Klaster MQ 1": ["mqserver1", "mqserver2"],
+    "Klaster MQ 2": ["mqserver3", "mqserver4"]
 }
 ```
 
@@ -262,6 +270,20 @@ Konfiguracja klastrów Windows używana przez:
 - `Collect-ClusterStatus.ps1` — pobiera węzły i role
 - `Collect-ClusterRoleSwitches.ps1` — pobiera historię przełączeń
 
+**Obsługiwane są dwa formaty:**
+
+#### Format 1: clusterNames (płaska tablica)
+```json
+{
+    "clusterNames": [
+        "sqlcluster1.domain.pl",
+        "fscluster1.domain.pl",
+        "mqcluster1.domain.pl"
+    ]
+}
+```
+
+#### Format 2: clusters (tablica obiektów z typami)
 ```json
 {
     "clusters": [
@@ -281,10 +303,28 @@ Konfiguracja klastrów Windows używana przez:
 }
 ```
 
+#### Format 3: połączony (oba formaty razem)
+```json
+{
+    "clusterNames": [
+        "sqlcluster1.domain.pl",
+        "fscluster1.domain.pl"
+    ],
+    "clusters": [
+        {"cluster_type": "SQL", "servers": ["sqlcluster1.domain.pl"]},
+        {"cluster_type": "FileShare", "servers": ["fscluster1.domain.pl"]}
+    ]
+}
+```
+
 | Pole | Opis |
 |------|------|
-| `cluster_type` | Typ klastra (SQL/FileShare/MQ) - używany do kolorowania w UI |
+| `clusterNames` | Płaska tablica nazw/FQDN klastrów (priorytet) |
+| `clusters` | Tablica obiektów z typem i listą serwerów |
+| `cluster_type` | Typ klastra (SQL/FileShare/MQ) - informacyjny |
 | `servers` | Lista FQDN lub nazw klastrów |
+
+> **Uwaga:** Jeśli istnieje `clusterNames`, skrypt używa tej listy. W przeciwnym razie wyciąga serwery z `clusters`.
 
 ### fileshare.csv
 
@@ -345,10 +385,36 @@ Konfiguracja serwerów w strefie DMZ z uwierzytelnieniem SSL.
 
 > **UWAGA:** Hasło musi być zaszyfrowane przez `Encrypt-Password.ps1` na tym samym komputerze i przez tego samego użytkownika Windows!
 
-### config_mq.json
+### mq_servers.json
 
-Konfiguracja serwerów IBM MQ (opcjonalna).
+Konfiguracja serwerów IBM MQ używana przez `Collect-InfraDaily.ps1`.
 
+**Obsługiwane są dwa formaty:**
+
+#### Format 1: Nowy (klastry z tablicami serwerów) - ZALECANY
+```json
+{
+    "MQW 1-2": [
+        "HAAMWQ1",
+        "HAAMWQ2"
+    ],
+    "MQW 3-4": [
+        "HAAMWQ3",
+        "HAAMWQ4"
+    ],
+    "FT MQ": [
+        "anowmq1",
+        "anowmq2"
+    ]
+}
+```
+
+| Pole | Opis |
+|------|------|
+| Klucz (np. "MQW 1-2") | Nazwa klastra MQ (wyświetlana w kolumnie Description) |
+| Wartość (tablica) | Lista nazw serwerów należących do klastra |
+
+#### Format 2: Stary (kompatybilność wsteczna)
 ```json
 {
     "servers": [
@@ -357,6 +423,8 @@ Konfiguracja serwerów IBM MQ (opcjonalna).
     ]
 }
 ```
+
+> **Uwaga:** Skrypt automatycznie rozpoznaje format i obsługuje oba. Nowy format jest prostszy gdy mamy pary serwerów w klastrach.
 
 ### EventLogsConfig.json
 
@@ -394,7 +462,7 @@ Lista typów logów dostępnych w zakładce Event Log.
 | Klastry Windows | `infra_ClustersWindows.json` | `clusters.json` (odpytywanie klastrów) | Co 5 min |
 | Udziały sieciowe | `infra_UdzialySieciowe.json` | `fileshare.csv` | Raz dziennie |
 | Instancje SQL | `infra_InstancjeSQL.json` | `sql_db_details.csv` | Raz dziennie |
-| Kolejki MQ | `infra_KolejkiMQ.json` | `config_mq.json` (odpytywanie serwerów) | Raz dziennie |
+| Kolejki MQ | `infra_KolejkiMQ.json` | `mq_servers.json` (odpytywanie serwerów) | Raz dziennie |
 | Przełączenia ról | `infra_PrzelaczeniaRol.json` | `clusters.json` (Event Log klastrów) | Raz dziennie |
 
 ### Logi systemowe

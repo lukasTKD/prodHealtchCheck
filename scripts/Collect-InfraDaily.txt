@@ -1,15 +1,16 @@
 #Requires -Version 5.1
 # =============================================================================
 # Collect-InfraDaily.ps1
-# Zbiera dane infrastrukturalne: udziały sieciowe, instancje SQL, kolejki MQ
+# Zbiera dane infrastrukturalne: udzialy sieciowe, instancje SQL, kolejki MQ
 # Uruchamiany raz dziennie (np. o 6:00)
-# Udziały sieciowe i instancje SQL czytane są z plików CSV
+# Udzialy sieciowe i instancje SQL czytane sa z plikow CSV
+# MQ - odpytywanie zdalne przez Invoke-Command (logika z old_working_ps)
 # =============================================================================
 
 $ScriptPath = $PSScriptRoot
 $ConfigFile = Join-Path (Split-Path $ScriptPath -Parent) "app-config.json"
 
-# Wczytaj konfigurację
+# Wczytaj konfiguracje
 if (Test-Path $ConfigFile) {
     $appConfig = Get-Content $ConfigFile -Raw | ConvertFrom-Json
     $BasePath = $appConfig.paths.basePath
@@ -23,7 +24,7 @@ if (Test-Path $ConfigFile) {
     $ConfigPath = "$BasePath\config"
 }
 
-# Upewnij się że katalogi istnieją
+# Upewnij sie ze katalogi istnieja
 @($DataPath, $LogsPath) | ForEach-Object {
     if (-not (Test-Path $_)) {
         New-Item -ItemType Directory -Path $_ -Force | Out-Null
@@ -54,7 +55,8 @@ function Find-ConfigFile {
     return $null
 }
 
-$MQConfigPath = Find-ConfigFile "config_mq.json"
+# Szukaj plikow konfiguracyjnych (obsluga obu nazw dla MQ)
+$MQConfigPath = Find-ConfigFile "mq_servers.json" @("config_mq.json")
 $FileShareCSVPath = Find-ConfigFile "fileshare.csv" @("fileShare.csv")
 $SQLDetailsCSVPath = Find-ConfigFile "sql_db_details.csv"
 
@@ -77,13 +79,13 @@ Write-Log "=== START zbierania danych infrastruktury ==="
 $globalStart = Get-Date
 
 # ===================================================================
-# REGION 1: UDZIAŁY SIECIOWE (z pliku CSV)
+# REGION 1: UDZIALY SIECIOWE (z pliku CSV)
 # ===================================================================
 Write-Log "--- Udzialy sieciowe (z CSV) ---"
 $startShares = Get-Date
 $shareResults = [System.Collections.ArrayList]::new()
 
-if (Test-Path $FileShareCSVPath) {
+if ($FileShareCSVPath -and (Test-Path $FileShareCSVPath)) {
     try {
         $csvData = Import-Csv -Path $FileShareCSVPath -Encoding UTF8
 
@@ -139,7 +141,7 @@ Write-Log "--- Instancje SQL (z CSV) ---"
 $startSQL = Get-Date
 $sqlResults = [System.Collections.ArrayList]::new()
 
-if (Test-Path $SQLDetailsCSVPath) {
+if ($SQLDetailsCSVPath -and (Test-Path $SQLDetailsCSVPath)) {
     try {
         $csvData = Import-Csv -Path $SQLDetailsCSVPath -Encoding UTF8
 
@@ -154,7 +156,7 @@ if (Test-Path $SQLDetailsCSVPath) {
             $serverName = $group.Name
             $firstRow = $group.Group[0]
 
-            # Pobierz wersję SQL i edycję z pierwszego wiersza
+            # Pobierz wersje SQL i edycje z pierwszego wiersza
             $sqlVersion = if ($firstRow.PSObject.Properties.Name -contains 'SQLServerVersion') { $firstRow.SQLServerVersion } else { "N/A" }
             $edition = if ($firstRow.PSObject.Properties.Name -contains 'Edition') { $firstRow.Edition } else { "N/A" }
 
@@ -203,121 +205,180 @@ $sqlDuration = [math]::Round(((Get-Date) - $startSQL).TotalSeconds, 1)
 Write-Log "SQL zapisane (${sqlDuration}s)"
 
 # ===================================================================
-# REGION 3: KOLEJKI MQ (odpytywanie serwerów - bez zmian)
+# REGION 3: KOLEJKI MQ (odpytywanie zdalne - logika z old_working_ps)
 # ===================================================================
 Write-Log "--- Kolejki MQ ---"
 $startMQ = Get-Date
 $mqResults = [System.Collections.ArrayList]::new()
 
-if (Test-Path $MQConfigPath) {
-    $mqConfig = Get-Content $MQConfigPath -Raw | ConvertFrom-Json
-    $mqServers = @($mqConfig.servers)
+if ($MQConfigPath -and (Test-Path $MQConfigPath)) {
+    Write-Log "Uzywam konfiguracji MQ: $MQConfigPath"
 
-    if ($mqServers.Count -gt 0) {
-        # ScriptBlock do zdalnego odpytania MQ
-        $mqScriptBlock = {
-            $qmgrResults = @()
-            $dspmqPath = "C:\Program Files\IBM\MQ\bin\dspmq.exe"
+    try {
+        $mqConfig = Get-Content $MQConfigPath -Raw | ConvertFrom-Json
 
-            if (Test-Path $dspmqPath) {
-                $qmgrs = & $dspmqPath 2>$null
-                foreach ($line in $qmgrs) {
-                    if ($line -match 'QMNAME\((.*?)\)\s+STATUS\((.*?)\)') {
-                        $qmgrName = $Matches[1]
-                        $qmgrStatus = $Matches[2]
+        # Obsluga nowego formatu mq_servers.json: { "Klaster1": ["srv1", "srv2"], "Klaster2": ["srv3", "srv4"] }
+        # oraz starego formatu config_mq.json: { "servers": [{ "name": "srv1", "description": "..." }] }
 
-                        $queues = @()
-                        $qmgrPort = ''
-                        if ($qmgrStatus -eq 'Running') {
-                            # Pobierz port listenera
-                            try {
-                                $lsnrCmd = "DISPLAY LISTENER(*) PORT`nEND"
-                                $lsnrOutput = echo $lsnrCmd | & "C:\Program Files\IBM\MQ\bin\runmqsc.exe" $qmgrName 2>$null
-                                foreach ($lline in $lsnrOutput) {
-                                    if ($lline -match 'PORT\((\d+)\)') {
-                                        $qmgrPort = $Matches[1]
-                                        break
-                                    }
-                                }
-                            } catch {}
+        $mqServerList = @()
 
-                            try {
-                                $cmd = "DISPLAY QLOCAL(*) CURDEPTH MAXDEPTH`nEND"
-                                $queueOutput = echo $cmd | & "C:\Program Files\IBM\MQ\bin\runmqsc.exe" $qmgrName 2>$null
-
-                                $currentQueue = $null
-                                foreach ($qline in $queueOutput) {
-                                    if ($qline -match 'QUEUE\((.*?)\)') {
-                                        if ($currentQueue) { $queues += $currentQueue }
-                                        $currentQueue = @{ QueueName = $Matches[1]; CurrentDepth = 0; MaxDepth = 0 }
-                                    }
-                                    if ($qline -match 'CURDEPTH\((\d+)\)' -and $currentQueue) {
-                                        $currentQueue.CurrentDepth = [int]$Matches[1]
-                                    }
-                                    if ($qline -match 'MAXDEPTH\((\d+)\)' -and $currentQueue) {
-                                        $currentQueue.MaxDepth = [int]$Matches[1]
-                                    }
-                                }
-                                if ($currentQueue) { $queues += $currentQueue }
-                                # Filtruj kolejki systemowe SYSTEM.*
-                                $queues = @($queues | Where-Object { $_.QueueName -notmatch '^SYSTEM\.' })
-                            } catch {}
-                        }
-
-                        $qmgrResults += @{
-                            QueueManager = $qmgrName
-                            Status       = $qmgrStatus
-                            Port         = $qmgrPort
-                            QueueCount   = $queues.Count
-                            Queues       = $queues
-                        }
+        if ($mqConfig.servers) {
+            # Stary format: { "servers": [{ "name": "srv1", "description": "desc" }] }
+            foreach ($srv in $mqConfig.servers) {
+                $mqServerList += @{
+                    ClusterName = ""
+                    ServerName  = $srv.name
+                    Description = $srv.description
+                }
+            }
+        } else {
+            # Nowy format: { "Klaster1": ["srv1", "srv2"], ... }
+            foreach ($prop in $mqConfig.PSObject.Properties) {
+                $clusterName = $prop.Name
+                $servers = @($prop.Value)
+                foreach ($srv in $servers) {
+                    $mqServerList += @{
+                        ClusterName = $clusterName
+                        ServerName  = $srv
+                        Description = $clusterName
                     }
                 }
             }
-
-            @{
-                ServerName    = $env:COMPUTERNAME
-                MQInstalled   = (Test-Path $dspmqPath)
-                QueueManagers = $qmgrResults
-            }
         }
 
-        $mqServerNames = @($mqServers | ForEach-Object { $_.name })
-        $mqRaw = Invoke-Command -ComputerName $mqServerNames -ScriptBlock $mqScriptBlock `
-            -ErrorAction SilentlyContinue -ErrorVariable mqErrors
+        Write-Log "Znaleziono $($mqServerList.Count) serwerow MQ do odpytania"
 
-        foreach ($r in $mqRaw) {
-            if ($r.ServerName) {
-                $mqSrvConfig = $mqServers | Where-Object { $_.name -eq $r.PSComputerName } | Select-Object -First 1
-                [void]$mqResults.Add(@{
-                    ServerName    = $r.ServerName
-                    Description   = if ($mqSrvConfig) { $mqSrvConfig.description } else { "" }
-                    MQInstalled   = $r.MQInstalled
-                    QueueManagers = @($r.QueueManagers)
-                    Error         = $null
-                })
-                Write-Log "OK MQ: $($r.ServerName)"
+        if ($mqServerList.Count -gt 0) {
+            # Zbierz unikalne nazwy serwerow
+            $uniqueServerNames = @($mqServerList | ForEach-Object { $_.ServerName } | Select-Object -Unique)
+
+            # ScriptBlock do zdalnego odpytania MQ (logika z old_working_ps/MQ_Qmanagers.ps1)
+            $mqScriptBlock = {
+                $qmgrResults = @()
+                $NodeName = $env:COMPUTERNAME
+
+                try {
+                    # Uruchom dspmq i sparsuj wyniki
+                    $mqData = dspmq 2>$null
+
+                    if ($mqData) {
+                        foreach ($line in $mqData) {
+                            # Regex z obsluga polskich znakow
+                            if ($line -match 'QMNAME\s*\(\s*(?<name>.*?)\s*\)\s+STATUS\s*\(\s*(?<state>.*?)\s*\)') {
+                                $qmName = $Matches['name'].Trim()
+                                $rawState = $Matches['state'].Trim()
+
+                                # Naprawa polskich znakow
+                                $cleanState = $rawState -replace 'Dzia.+?c[ye]', 'Running'
+                                if ($cleanState -notmatch 'Running|Ended') {
+                                    $cleanState = $rawState
+                                }
+
+                                $Port = ""
+                                $queues = @()
+
+                                # Jezeli manager dziala - pobierz port i kolejki
+                                if ($cleanState -match 'Running|Dzia') {
+                                    # Pobierz port listenera
+                                    try {
+                                        $listenerData = "DISPLAY LSSTATUS(*) PORT" | runmqsc $qmName 2>$null
+                                        if ($listenerData) {
+                                            foreach ($lLine in $listenerData) {
+                                                if ($lLine -match 'PORT\s*\(\s*(?<p>\d+)\s*\)') {
+                                                    $Port = $Matches['p']
+                                                    break
+                                                }
+                                            }
+                                        }
+                                    } catch {}
+
+                                    # Pobierz kolejki lokalne (bez systemowych)
+                                    try {
+                                        $queueOutput = "DISPLAY QLOCAL(*)" | runmqsc $qmName 2>$null
+                                        if ($queueOutput) {
+                                            foreach ($qLine in $queueOutput) {
+                                                if ($qLine -match 'QUEUE\s*\(\s*(?<qname>.*?)\s*\)') {
+                                                    $qName = $Matches['qname'].Trim()
+                                                    # Filtr: pomijamy kolejki systemowe IBM
+                                                    if ($qName -notmatch '^SYSTEM\.|^AMQ\.') {
+                                                        $queues += @{
+                                                            QueueName    = $qName
+                                                            CurrentDepth = 0
+                                                            MaxDepth     = 0
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    } catch {}
+                                }
+
+                                $qmgrResults += @{
+                                    QueueManager = $qmName
+                                    Status       = $cleanState
+                                    Port         = $Port
+                                    QueueCount   = $queues.Count
+                                    Queues       = $queues
+                                }
+                            }
+                        }
+                    }
+                } catch {
+                    # Blad dspmq
+                }
+
+                @{
+                    ServerName    = $NodeName
+                    MQInstalled   = ($qmgrResults.Count -gt 0)
+                    QueueManagers = $qmgrResults
+                }
             }
-        }
 
-        # Serwery niedostępne
-        $okMQ = @($mqRaw | ForEach-Object { $_.PSComputerName })
-        foreach ($srv in $mqServerNames) {
-            if ($srv -notin $okMQ) {
-                $mqSrvConfig = $mqServers | Where-Object { $_.name -eq $srv } | Select-Object -First 1
-                [void]$mqResults.Add(@{
-                    ServerName    = $srv
-                    Description   = if ($mqSrvConfig) { $mqSrvConfig.description } else { "" }
-                    MQInstalled   = $false
-                    QueueManagers = @()
-                    Error         = "Timeout/Niedostepny"
-                })
-                Write-Log "FAIL MQ: $srv"
+            # Odpytaj wszystkie serwery MQ rownolegle
+            Write-Log "Odpytuje serwery MQ: $($uniqueServerNames -join ', ')"
+
+            $mqRaw = Invoke-Command -ComputerName $uniqueServerNames -ScriptBlock $mqScriptBlock `
+                -ErrorAction SilentlyContinue -ErrorVariable mqErrors
+
+            # Przetworz wyniki
+            foreach ($r in $mqRaw) {
+                if ($r.ServerName) {
+                    # Znajdz opis klastra dla tego serwera
+                    $srvConfig = $mqServerList | Where-Object { $_.ServerName -eq $r.PSComputerName } | Select-Object -First 1
+
+                    [void]$mqResults.Add(@{
+                        ServerName    = $r.ServerName
+                        Description   = if ($srvConfig) { $srvConfig.Description } else { "" }
+                        MQInstalled   = $r.MQInstalled
+                        QueueManagers = @($r.QueueManagers)
+                        Error         = $null
+                    })
+                    Write-Log "OK MQ: $($r.ServerName) - $($r.QueueManagers.Count) managerow"
+                }
+            }
+
+            # Serwery niedostepne
+            $okMQ = @($mqRaw | ForEach-Object { $_.PSComputerName })
+            foreach ($srv in $uniqueServerNames) {
+                if ($srv -notin $okMQ) {
+                    $srvConfig = $mqServerList | Where-Object { $_.ServerName -eq $srv } | Select-Object -First 1
+                    [void]$mqResults.Add(@{
+                        ServerName    = $srv
+                        Description   = if ($srvConfig) { $srvConfig.Description } else { "" }
+                        MQInstalled   = $false
+                        QueueManagers = @()
+                        Error         = "Timeout/Niedostepny"
+                    })
+                    Write-Log "FAIL MQ: $srv"
+                }
             }
         }
     }
+    catch {
+        Write-Log "BLAD: Nie mozna sparsowac pliku konfiguracji MQ: $MQConfigPath - $($_.Exception.Message)"
+    }
 } else {
-    Write-Log "INFO: Brak konfiguracji MQ ($MQConfigPath) - pomijam"
+    Write-Log "INFO: Brak konfiguracji MQ - pomijam"
 }
 
 $mqDuration = [math]::Round(((Get-Date) - $startMQ).TotalSeconds, 1)
