@@ -5,17 +5,8 @@
 # =============================================================================
 
 $ScriptPath = $PSScriptRoot
-$ConfigFile = Join-Path (Split-Path $ScriptPath -Parent) "app-config.json"
-
-# Wczytaj konfigurację
-if (Test-Path $ConfigFile) {
-    $appConfig = Get-Content $ConfigFile -Raw | ConvertFrom-Json
-    $BasePath = $appConfig.paths.basePath
-    $LogsPath = $appConfig.paths.logsPath
-} else {
-    $BasePath = "D:\PROD_REPO_DATA\IIS\prodHealtchCheck"
-    $LogsPath = "$BasePath\logs"
-}
+$BasePath = "D:\PROD_REPO_DATA\IIS\prodHealtchCheck"
+$LogsPath = "$BasePath\logs"
 
 # Upewnij się że katalog logów istnieje
 if (-not (Test-Path $LogsPath)) {

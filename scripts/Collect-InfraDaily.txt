@@ -1,13 +1,14 @@
 # Collect-InfraDaily.ps1
-# Prosty skrypt — FileShares, SQL z CSV, MQ kolejki
-# Wzor: Get-ClusterResources.ps1, MQ_Qmanagers.ps1, MQ_kolejki_lista.ps1
+# Zbiera udzialy sieciowe + kolejki MQ -> fileShare.csv + mq_queue_list.csv
+# SQL dane sa w sql_db_details.csv (bez zmian, api.aspx czyta bezposrednio)
+# Wzor z: Get-ClusterResources.ps1, MQ_kolejki_lista.ps1
+# ZERO JSON — tylko Import-Csv i Export-Csv
 
 # --- SCIEZKI ---
-$ScriptDir  = Split-Path $PSScriptRoot -Parent
-$appConfig  = (Get-Content "$ScriptDir\app-config.json" -Raw).Trim() | ConvertFrom-Json
-$DataPath   = $appConfig.paths.dataPath
-$ConfigPath = $appConfig.paths.configPath
-$LogsPath   = $appConfig.paths.logsPath
+$BasePath   = "D:\PROD_REPO_DATA\IIS\prodHealtchCheck"
+$DataPath   = "$BasePath\data"
+$ConfigPath = "$BasePath\config"
+$LogsPath   = "$BasePath\logs"
 
 if (!(Test-Path $DataPath)) { New-Item -ItemType Directory -Path $DataPath -Force | Out-Null }
 if (!(Test-Path $LogsPath)) { New-Item -ItemType Directory -Path $LogsPath -Force | Out-Null }
@@ -15,168 +16,181 @@ if (!(Test-Path $LogsPath)) { New-Item -ItemType Directory -Path $LogsPath -Forc
 $LogFile = "$LogsPath\ServerHealthMonitor.log"
 function Log($msg) { "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') [INFRA] $msg" | Out-File $LogFile -Append -Encoding UTF8 }
 
-Log "=== START Collect-InfraDaily ==="
+Log "START Collect-InfraDaily"
 
-$clustersJson = (Get-Content "$ConfigPath\clusters.json" -Raw).Trim() | ConvertFrom-Json
-$mqJson       = $null
-$mqFile       = "$ConfigPath\mq_servers.json"
-if (Test-Path $mqFile) {
-    $mqRaw = (Get-Content $mqFile -Raw).Trim()
-    Log "mq_servers.json: $($mqRaw.Length) znakow z $mqFile"
-    Write-Host "MQ config: $($mqRaw.Length) znakow z $mqFile"
-    $mqJson = $mqRaw | ConvertFrom-Json
-}
+# --- KONFIGURACJA Z CSV ---
+$clustersCfg  = Import-Csv "$ConfigPath\clusters_config.csv"
+$mqServersCfg = Import-Csv "$ConfigPath\mq_servers_config.csv"
 
 
 # ==========================================
 # 1. UDZIALY SIECIOWE
-# Wzor z Get-ClusterResources.ps1: Get-SmbShare -CimSession
+# Identycznie jak Get-ClusterResources.ps1
 # ==========================================
+Write-Host "=== Udzialy sieciowe ==="
 Log "--- Udzialy sieciowe ---"
-$shareResults = @()
 
-$fsServers = @($clustersJson.clusters | Where-Object { $_.cluster_type -eq "FileShare" } | ForEach-Object { $_.servers } | ForEach-Object { $_ })
+$shareResults = @()
+$fsServers = @($clustersCfg | Where-Object { $_.ClusterType -eq "FileShare" } | ForEach-Object { $_.ServerName })
+Write-Host "Serwery FileShare: $($fsServers -join ', ')"
 
 foreach ($srv in $fsServers) {
+    Write-Host "  $srv ..."
     Log "  FileShare: $srv"
     try {
-        $shares = @(Get-SmbShare -CimSession $srv -Special $false -ErrorAction Stop | ForEach-Object {
-            [PSCustomObject]@{ ShareName = $_.Name; SharePath = $_.Path; ShareState = "Online" }
-        })
-        $shareResults += [PSCustomObject]@{ ServerName = $srv; ShareCount = $shares.Count; Shares = $shares; Error = $null }
-        Log "    OK: $($shares.Count) udzialow"
-    } catch {
-        $shareResults += [PSCustomObject]@{ ServerName = $srv; ShareCount = 0; Shares = @(); Error = $_.Exception.Message }
-        Log "    FAIL: $($_.Exception.Message)"
-    }
-}
-
-@{
-    LastUpdate   = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-    TotalServers = $shareResults.Count
-    FileServers  = $shareResults
-} | ConvertTo-Json -Depth 10 | Out-File "$DataPath\infra_UdzialySieciowe.json" -Encoding UTF8 -Force
-
-Log "Udzialy: $($shareResults.Count) serwerow"
-
-
-# ==========================================
-# 2. INSTANCJE SQL — z pliku CSV
-# ==========================================
-Log "--- Instancje SQL ---"
-$sqlResults = @()
-
-# Szukaj CSV
-$sqlCsv = $null
-foreach ($p in @("$DataPath\sql_db_details.csv", "$ConfigPath\sql_db_details.csv", "D:\PROD_REPO_DATA\IIS\Cluster\data\sql_db_details.csv")) {
-    if (Test-Path $p) { $sqlCsv = Import-Csv $p; Log "  SQL CSV: $p"; break }
-}
-
-if ($sqlCsv) {
-    $grouped = $sqlCsv | Group-Object -Property sql_server
-    foreach ($grp in $grouped) {
-        $dbs = @($grp.Group | ForEach-Object {
-            [PSCustomObject]@{
-                DatabaseName       = $_.DatabaseName
-                CompatibilityLevel = $_.CompatibilityLevel
-                DataFileSizeMB     = [math]::Round([double]($_.DataFileSizeMB -replace ',','.'), 2)
-                LogFileSizeMB      = [math]::Round([double]($_.LogFileSizeMB -replace ',','.'), 2)
-                TotalSizeMB        = [math]::Round([double]($_.TotalSizeMB -replace ',','.'), 2)
+        $shares = Get-SmbShare -CimSession $srv -Special $false -ErrorAction Stop
+        foreach ($s in $shares) {
+            $shareResults += [PSCustomObject]@{
+                ServerName = $srv
+                ShareName  = $s.Name
+                SharePath  = $s.Path
+                ShareState = "Online"
             }
-        })
-        $totalMB = ($dbs | Measure-Object -Property TotalSizeMB -Sum).Sum
-        $sqlResults += [PSCustomObject]@{
-            ServerName    = $grp.Name
-            SQLVersion    = $(if ($grp.Group[0].SQLServerVersion) { $grp.Group[0].SQLServerVersion } else { "N/A" })
-            DatabaseCount = $dbs.Count
-            TotalSizeMB   = [math]::Round($totalMB, 2)
-            Databases     = $dbs
-            Error         = $null
         }
-        Log "    $($grp.Name): $($dbs.Count) baz"
+        Write-Host "    OK: $(@($shares).Count) udzialow" -ForegroundColor Green
+        Log "    OK: $(@($shares).Count) udzialow"
+    } catch {
+        $shareResults += [PSCustomObject]@{
+            ServerName = $srv
+            ShareName  = "ERROR"
+            SharePath  = $_.Exception.Message
+            ShareState = "Error"
+        }
+        Write-Host "    BLAD: $($_.Exception.Message)" -ForegroundColor Red
+        Log "    BLAD: $($_.Exception.Message)"
     }
-} else {
-    Log "  WARN: Brak sql_db_details.csv"
 }
 
-@{
-    LastUpdate     = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-    TotalInstances = $sqlResults.Count
-    Instances      = $sqlResults
-} | ConvertTo-Json -Depth 10 | Out-File "$DataPath\infra_InstancjeSQL.json" -Encoding UTF8 -Force
+$shareCsv = "$DataPath\fileShare.csv"
+if (Test-Path $shareCsv) { Remove-Item $shareCsv }
+if ($shareResults.Count -gt 0) {
+    $shareResults | Export-Csv -Path $shareCsv -NoTypeInformation -Encoding UTF8
+}
+Write-Host "Zapisano: fileShare.csv ($($shareResults.Count) wierszy)"
+Log "FileShares: $($shareResults.Count) wierszy"
 
-Log "SQL: $($sqlResults.Count) serwerow"
+
+# ==========================================
+# 2. SQL — juz istnieje w sql_db_details.csv
+# api.aspx czyta ten plik bezposrednio, nic tu nie robimy
+# ==========================================
+Write-Host "`n=== SQL ==="
+$sqlPaths = @("$DataPath\sql_db_details.csv", "D:\PROD_REPO_DATA\IIS\Cluster\data\sql_db_details.csv")
+$sqlFound = $false
+foreach ($p in $sqlPaths) {
+    if (Test-Path $p) { Write-Host "  SQL CSV istnieje: $p ($(((Get-Item $p).Length / 1KB).ToString('0.0')) KB)"; $sqlFound = $true; break }
+}
+if (!$sqlFound) { Write-Host "  BRAK sql_db_details.csv" -ForegroundColor Yellow }
+Log "SQL: $(if ($sqlFound) { 'OK' } else { 'BRAK' })"
 
 
 # ==========================================
 # 3. KOLEJKI MQ
-# Wzor z MQ_Qmanagers.ps1 + MQ_kolejki_lista.ps1
+# Identycznie jak MQ_kolejki_lista.ps1
 # ==========================================
+Write-Host "`n=== Kolejki MQ ==="
 Log "--- Kolejki MQ ---"
+
 $mqResults = @()
+$allMQServers = @($mqServersCfg | ForEach-Object { $_.ServerName })
+Write-Host "Serwery MQ: $($allMQServers -join ', ')"
 
-if ($mqJson) {
-    # Zbierz WSZYSTKIE serwery MQ + mapowanie serwer -> grupa
-    $allMQServers = @()
-    $mqGroupMap   = @{}
-    foreach ($grp in $mqJson.PSObject.Properties) {
-        foreach ($srv in $grp.Value) {
-            $allMQServers += $srv
-            $mqGroupMap[$srv] = $grp.Name
-        }
-    }
-    Log "  MQ serwery: $($allMQServers -join ', ')"
+# Mapowanie serwer -> grupa
+$srvToGroup = @{}
+foreach ($entry in $mqServersCfg) { $srvToGroup[$entry.ServerName] = $entry.GroupName }
 
-    # JEDNO wywolanie na WSZYSTKIE serwery MQ — rownolegle
-    $mqRawAll = Invoke-Command -ComputerName $allMQServers -ErrorAction SilentlyContinue -ErrorVariable mqErrs -ScriptBlock {
-        $qmgrs = @()
-        $mqData = dspmq 2>$null
-        if ($mqData) {
-            foreach ($line in $mqData) {
-                if ($line -match 'QMNAME\s*\(\s*(?<name>.*?)\s*\)\s+STATUS\s*\(\s*(?<state>.*?)\s*\)') {
-                    $qmName = $Matches['name'].Trim()
-                    $state  = $Matches['state'].Trim() -replace 'Dzia.+?c[ye]', 'Running'
-                    $port   = ""
+# Jedno wywolanie na wszystkie serwery MQ
+$mqRaw = Invoke-Command -ComputerName $allMQServers -ErrorAction SilentlyContinue -ErrorVariable mqErrs -ScriptBlock {
+    $ServerName = $env:COMPUTERNAME
+
+    try {
+        $dspmqOutput = dspmq 2>$null
+        if ($dspmqOutput) {
+            foreach ($line in $dspmqOutput) {
+                if ($line -match 'QMNAME\s*\(\s*(?<qm>.*?)\s*\).*?STATUS\s*\(\s*(?<stat>.*?)\s*\)') {
+                    $qmName = $Matches['qm'].Trim()
+                    $status = $Matches['stat'].Trim() -replace 'Dzia.+?c[ye]', 'Running'
+
+                    $Port = ""
                     $queues = @()
 
-                    if ($state -match 'Running|Dzia') {
+                    if ($status -match 'Running|Dzia') {
+                        # Port
                         $ls = "DISPLAY LSSTATUS(*) PORT" | runmqsc $qmName 2>$null
-                        if ($ls) { foreach ($l in $ls) { if ($l -match 'PORT\s*\(\s*(?<p>\d+)\s*\)') { $port = $Matches['p']; break } } }
+                        if ($ls) { foreach ($l in $ls) { if ($l -match 'PORT\s*\(\s*(?<p>\d+)\s*\)') { $Port = $Matches['p']; break } } }
 
+                        # Kolejki
                         $qd = "DISPLAY QLOCAL(*)" | runmqsc $qmName 2>$null
-                        if ($qd) { foreach ($q in $qd) { if ($q -match 'QUEUE\s*\(\s*(?<qn>.*?)\s*\)') { $qn = $Matches['qn'].Trim(); if ($qn -notmatch '^SYSTEM\.|^AMQ\.') { $queues += [PSCustomObject]@{ QueueName = $qn } } } } }
+                        if ($qd) {
+                            foreach ($q in $qd) {
+                                if ($q -match 'QUEUE\s*\(\s*(?<qn>.*?)\s*\)') {
+                                    $qn = $Matches['qn'].Trim()
+                                    if ($qn -notmatch '^SYSTEM\.|^AMQ\.') {
+                                        $queues += $qn
+                                    }
+                                }
+                            }
+                        }
                     }
 
-                    $qmgrs += [PSCustomObject]@{ QueueManager = $qmName; Status = $state; Port = $port; QueueCount = $queues.Count; Queues = $queues }
+                    # Wiersz na kazda kolejke
+                    foreach ($qn in $queues) {
+                        [PSCustomObject]@{
+                            QManager   = $qmName
+                            Status     = $status
+                            Port       = $Port
+                            QueueName  = $qn
+                            ServerName = $ServerName
+                        }
+                    }
+                    # Jesli brak kolejek, dodaj sam QManager
+                    if ($queues.Count -eq 0) {
+                        [PSCustomObject]@{
+                            QManager   = $qmName
+                            Status     = $status
+                            Port       = $Port
+                            QueueName  = ""
+                            ServerName = $ServerName
+                        }
+                    }
                 }
             }
         }
-        [PSCustomObject]@{ ServerName = $env:COMPUTERNAME; QueueManagers = $qmgrs }
-    }
-
-    # Przetwarzanie wynikow
-    foreach ($r in $mqRawAll) {
-        $grpName = $mqGroupMap[$r.PSComputerName]
-        $mqResults += [PSCustomObject]@{ ServerName = $r.ServerName; Description = $grpName; QueueManagers = @($r.QueueManagers); Error = $null }
-        Log "    OK: $($r.ServerName) ($grpName)"
-    }
-    # Serwery ktore nie odpowiedzialy
-    $okMQ = @($mqRawAll | ForEach-Object { $_.PSComputerName })
-    foreach ($srv in $allMQServers) {
-        if ($srv -notin $okMQ) {
-            $mqResults += [PSCustomObject]@{ ServerName = $srv; Description = $mqGroupMap[$srv]; QueueManagers = @(); Error = "Niedostepny" }
-            Log "    FAIL: $srv"
+    } catch {
+        [PSCustomObject]@{
+            QManager   = "ERROR"
+            Status     = "Blad"
+            Port       = ""
+            QueueName  = $_.Exception.Message
+            ServerName = $ServerName
         }
     }
-} else {
-    Log "  WARN: Brak mq_servers.json"
 }
 
-@{
-    LastUpdate   = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-    TotalServers = $mqResults.Count
-    Servers      = $mqResults
-} | ConvertTo-Json -Depth 10 | Out-File "$DataPath\infra_KolejkiMQ.json" -Encoding UTF8 -Force
+foreach ($r in $mqRaw) {
+    $mqResults += [PSCustomObject]@{
+        QManager   = $r.QManager
+        Status     = $r.Status
+        Port       = $r.Port
+        QueueName  = $r.QueueName
+        ServerName = $r.ServerName
+        GroupName  = $srvToGroup[$r.PSComputerName]
+    }
+}
 
-Log "MQ: $($mqResults.Count) serwerow"
-Log "=== KONIEC Collect-InfraDaily ==="
+foreach ($err in $mqErrs) {
+    Write-Host "  BLAD MQ: $($err.TargetObject) - $($err.Exception.Message)" -ForegroundColor Red
+    Log "  BLAD MQ: $($err.TargetObject) - $($err.Exception.Message)"
+}
+
+$mqCsv = "$DataPath\mq_queue_list.csv"
+if (Test-Path $mqCsv) { Remove-Item $mqCsv }
+if ($mqResults.Count -gt 0) {
+    $mqResults | Export-Csv -Path $mqCsv -NoTypeInformation -Encoding UTF8
+}
+Write-Host "Zapisano: mq_queue_list.csv ($($mqResults.Count) wierszy)"
+Log "MQ: $($mqResults.Count) wierszy"
+
+
+Write-Host "`n=== GOTOWE ===" -ForegroundColor Green
+Log "KONIEC Collect-InfraDaily"

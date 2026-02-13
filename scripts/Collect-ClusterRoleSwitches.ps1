@@ -1,87 +1,85 @@
 # Collect-ClusterRoleSwitches.ps1
-# Prosty skrypt — eventy przelaczen z klastrow SQL i FileShare
+# Zbiera eventy przelaczen z klastrow SQL i FileShare -> role_switches.csv
+# ZERO JSON — tylko Import-Csv i Export-Csv
 
 # --- SCIEZKI ---
-$ScriptDir  = Split-Path $PSScriptRoot -Parent
-$appConfig  = (Get-Content "$ScriptDir\app-config.json" -Raw).Trim() | ConvertFrom-Json
-$DataPath   = $appConfig.paths.dataPath
-$ConfigPath = $appConfig.paths.configPath
-$LogsPath   = $appConfig.paths.logsPath
+$BasePath   = "D:\PROD_REPO_DATA\IIS\prodHealtchCheck"
+$DataPath   = "$BasePath\data"
+$ConfigPath = "$BasePath\config"
+$LogsPath   = "$BasePath\logs"
+$DaysBack   = 30
 
 if (!(Test-Path $DataPath)) { New-Item -ItemType Directory -Path $DataPath -Force | Out-Null }
 if (!(Test-Path $LogsPath)) { New-Item -ItemType Directory -Path $LogsPath -Force | Out-Null }
 
-$OutputFile = "$DataPath\infra_PrzelaczeniaRol.json"
-$LogFile    = "$LogsPath\ServerHealthMonitor.log"
-$DaysBack   = 30
-
+$LogFile = "$LogsPath\ServerHealthMonitor.log"
 function Log($msg) { "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') [ROLE-SWITCH] $msg" | Out-File $LogFile -Append -Encoding UTF8 }
 
-Log "START"
+Log "START Collect-ClusterRoleSwitches"
 
-$clustersJson = (Get-Content "$ConfigPath\clusters.json" -Raw).Trim() | ConvertFrom-Json
+# --- KONFIGURACJA Z CSV ---
+$clustersCfg = Import-Csv "$ConfigPath\clusters_config.csv"
 
 # Tylko SQL i FileShare — MQ nie maja FailoverClustering
-$clusterServers = @($clustersJson.clusters | Where-Object { $_.cluster_type -ne "MQ" })
-Write-Host "Klastry (SQL+FS): $($clusterServers.Count)"
-foreach ($def in $clusterServers) { Write-Host "  $($def.cluster_type): $($def.servers -join ', ')" }
+$sqlFsServers = @($clustersCfg | Where-Object { $_.ClusterType -ne "MQ" })
+Write-Host "Klastry SQL/FS: $($sqlFsServers.Count) serwerow"
+Log "Klastry SQL/FS: $($sqlFsServers.Count) serwerow"
 
-if ($clusterServers.Count -eq 0) {
-    Log "Brak klastrow SQL/FileShare"
-    @{ LastUpdate = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss"); DaysBack = $DaysBack; TotalEvents = 0; Switches = @() } |
-        ConvertTo-Json -Depth 10 | Out-File $OutputFile -Encoding UTF8 -Force
+if ($sqlFsServers.Count -eq 0) {
+    Write-Host "Brak klastrow" -ForegroundColor Yellow
+    Log "Brak klastrow"
+    # Pusty CSV z naglowkiem
+    [PSCustomObject]@{
+        TimeCreated = ""; EventId = ""; EventType = ""; ClusterName = ""
+        ClusterType = ""; RoleName = ""; SourceNode = ""; TargetNode = ""; ReportedBy = ""
+    } | Export-Csv -Path "$DataPath\role_switches.csv" -NoTypeInformation -Encoding UTF8
+    # Nadpisz pustym (tylko naglowek)
+    "TimeCreated,EventId,EventType,ClusterName,ClusterType,RoleName,SourceNode,TargetNode,ReportedBy" | Out-File "$DataPath\role_switches.csv" -Encoding UTF8
     exit 0
 }
 
-# Krok 1: Pobierz wezly — jedno Invoke-Command na pierwszy serwer z kazdego klastra
-$nodeMap  = @()
-$done     = @{}
-$allNodes = @()
+# KROK 1: Znajdz klastry i ich wezly
+$done = @{}
+$nodeMap = @()
 
-# Zbierz po jednym serwerze z kazdego klastra (unikamy duplikatow od razu)
-$firstServers = @()
-$srvTypeMap   = @{}
-foreach ($def in $clusterServers) {
-    $srv = $def.servers[0]
-    $firstServers += $srv
-    $srvTypeMap[$srv] = $def.cluster_type
-}
-Write-Host "Odpytuje serwery: $($firstServers -join ', ')"
+foreach ($entry in $sqlFsServers) {
+    $srv  = $entry.ServerName
+    $type = $entry.ClusterType
+    Write-Host "  $type : $srv"
 
-# Jedno rownolegle wywolanie
-$clusterInfos = Invoke-Command -ComputerName $firstServers -ErrorAction SilentlyContinue -ErrorVariable nodeErrors -ScriptBlock {
-    [PSCustomObject]@{
-        ClusterName = (Get-Cluster).Name
-        Nodes       = @(Get-ClusterNode | Select-Object -ExpandProperty Name)
+    try {
+        $info = Invoke-Command -ComputerName $srv -ErrorAction Stop -ScriptBlock {
+            [PSCustomObject]@{
+                ClusterName = (Get-Cluster).Name
+                Nodes       = @(Get-ClusterNode | Select-Object -ExpandProperty Name)
+            }
+        }
+
+        if ($done[$info.ClusterName]) { Write-Host "    Pomijam duplikat"; continue }
+        $done[$info.ClusterName] = $true
+
+        foreach ($node in $info.Nodes) {
+            $nodeMap += [PSCustomObject]@{ ClusterName = $info.ClusterName; ClusterType = $type; NodeName = $node }
+        }
+        Write-Host "    OK: $($info.ClusterName) ($($info.Nodes.Count) wezlow)" -ForegroundColor Green
+        Log "  $($info.ClusterName) ($type): $($info.Nodes.Count) wezlow"
+    } catch {
+        Write-Host "    BLAD: $($_.Exception.Message)" -ForegroundColor Red
+        Log "  BLAD $srv : $($_.Exception.Message)"
     }
 }
 
-foreach ($info in $clusterInfos) {
-    $originSrv = $info.PSComputerName
-    $type = $srvTypeMap[$originSrv]
-    if ($done[$info.ClusterName]) { continue }
-    $done[$info.ClusterName] = $true
+$uniqueNodes = @($nodeMap | ForEach-Object { $_.NodeName } | Sort-Object -Unique)
+Write-Host "`nWezly ($($uniqueNodes.Count)): $($uniqueNodes -join ', ')"
+Log "Odpytuje $($uniqueNodes.Count) wezlow"
 
-    foreach ($node in $info.Nodes) {
-        $nodeMap  += [PSCustomObject]@{ ClusterName = $info.ClusterName; ClusterType = $type; NodeName = $node }
-        $allNodes += $node
-    }
-    Log "  $($info.ClusterName) ($type): $($info.Nodes.Count) wezlow"
-}
-foreach ($err in $nodeErrors) { Log "  FAIL: $($err.TargetObject) - $($err.Exception.Message)"; Write-Host "  BLAD: $($err.TargetObject) - $($err.Exception.Message)" -ForegroundColor Red }
-Write-Host "Klastry znalezione: $(if ($clusterInfos) { @($clusterInfos).Count } else { 0 })"
-
-$allNodes = @($allNodes | Sort-Object -Unique)
-Write-Host "Wezly ($($allNodes.Count)): $($allNodes -join ', ')"
-Log "Odpytuje $($allNodes.Count) wezlow..."
-
-# Krok 2: Pobierz eventy
+# KROK 2: Pobierz eventy przelaczen
 $eventIDs  = @(1069, 1070, 1071, 1201, 1202, 1205, 1564, 1566)
 $startDate = (Get-Date).AddDays(-$DaysBack)
 $switches  = @()
 
-if ($allNodes.Count -gt 0) {
-    $raw = Invoke-Command -ComputerName $allNodes -ErrorAction SilentlyContinue -ScriptBlock {
+if ($uniqueNodes.Count -gt 0) {
+    $raw = Invoke-Command -ComputerName $uniqueNodes -ErrorAction SilentlyContinue -ErrorVariable evtErrors -ScriptBlock {
         param($startDate, $eventIDs)
         try {
             Get-WinEvent -FilterHashtable @{
@@ -91,7 +89,7 @@ if ($allNodes.Count -gt 0) {
             } -ErrorAction SilentlyContinue | ForEach-Object {
                 $msg = $_.Message
                 $role = ""; $target = ""; $source = ""
-                if ($msg -match "Cluster group '([^']+)'")     { $role   = $Matches[1] }
+                if ($msg -match "Cluster group '([^']+)'")       { $role   = $Matches[1] }
                 elseif ($msg -match "Cluster resource '([^']+)'") { $role = $Matches[1] }
                 if ($msg -match "node '([^']+)'")        { $target = $Matches[1] }
                 if ($msg -match "from node '([^']+)'")   { $source = $Matches[1] }
@@ -99,7 +97,11 @@ if ($allNodes.Count -gt 0) {
                 [PSCustomObject]@{
                     TimeCreated = $_.TimeCreated.ToString("yyyy-MM-dd HH:mm:ss")
                     EventId     = $_.Id
-                    EventType   = switch ($_.Id) { 1069 {"ResourceOnline"} 1070 {"ResourceOffline"} 1071 {"ResourceFailed"} 1201 {"GroupOnline"} 1202 {"GroupOffline"} 1205 {"GroupMoved"} 1564 {"FailoverStarted"} 1566 {"FailoverCompleted"} default {"Unknown"} }
+                    EventType   = switch ($_.Id) {
+                        1069 {"ResourceOnline"} 1070 {"ResourceOffline"} 1071 {"ResourceFailed"}
+                        1201 {"GroupOnline"} 1202 {"GroupOffline"} 1205 {"GroupMoved"}
+                        1564 {"FailoverStarted"} 1566 {"FailoverCompleted"} default {"Unknown"}
+                    }
                     RoleName    = $role
                     SourceNode  = $source
                     TargetNode  = $target
@@ -124,6 +126,11 @@ if ($allNodes.Count -gt 0) {
             ReportedBy  = $r.PSComputerName
         }
     }
+
+    foreach ($err in $evtErrors) {
+        Write-Host "  BLAD: $($err.TargetObject) - $($err.Exception.Message)" -ForegroundColor Red
+        Log "  BLAD: $($err.TargetObject) - $($err.Exception.Message)"
+    }
 }
 
 # Deduplikacja
@@ -134,13 +141,17 @@ foreach ($s in $switches) {
     $key = "$($s.TimeCreated)|$($s.EventId)|$($s.RoleName)|$($s.ClusterName)"
     if (!$seen[$key]) { $seen[$key] = $true; $unique += $s }
 }
-Write-Host "Eventy: $($switches.Count) surowych, $($unique.Count) unikalnych"
 
-@{
-    LastUpdate  = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-    DaysBack    = $DaysBack
-    TotalEvents = $unique.Count
-    Switches    = $unique
-} | ConvertTo-Json -Depth 10 | Out-File $OutputFile -Encoding UTF8 -Force
+# ZAPIS DO CSV
+$csvPath = "$DataPath\role_switches.csv"
+if (Test-Path $csvPath) { Remove-Item $csvPath }
+if ($unique.Count -gt 0) {
+    $unique | Export-Csv -Path $csvPath -NoTypeInformation -Encoding UTF8
+} else {
+    # Pusty CSV z naglowkiem
+    "TimeCreated,EventId,EventType,ClusterName,ClusterType,RoleName,SourceNode,TargetNode,ReportedBy" | Out-File $csvPath -Encoding UTF8
+}
 
+Write-Host "`n=== GOTOWE ===" -ForegroundColor Green
+Write-Host "role_switches.csv: $($unique.Count) wierszy"
 Log "KONIEC: $($unique.Count) zdarzen"
