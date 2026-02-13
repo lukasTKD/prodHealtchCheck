@@ -36,16 +36,11 @@ foreach ($def in ($clustersJson.clusters | Where-Object { $_.cluster_type -ne "M
     foreach ($srv in $def.servers) {
         Log "  Klaster $type : $srv"
         try {
-            # Nazwa klastra
-            $clName = Invoke-Command -ComputerName $srv -ErrorAction Stop -ScriptBlock { (Get-Cluster).Name }
+            # JEDNO wywolanie — wszystko naraz (nazwa klastra + wezly + role)
+            $data = Invoke-Command -ComputerName $srv -ErrorAction Stop -ScriptBlock {
+                $clName = (Get-Cluster).Name
 
-            # Pomijaj duplikaty (ten sam klaster z drugiego wezla)
-            if ($done[$clName]) { Log "    Pomijam (duplikat $clName)"; continue }
-            $done[$clName] = $true
-
-            # Wezly — kopia z Untitled6.ps1 / ClusterNodeStatus()
-            $nodes = @(Invoke-Command -ComputerName $srv -ErrorAction Stop -ScriptBlock {
-                Get-ClusterNode | ForEach-Object {
+                $nodes = @(Get-ClusterNode | ForEach-Object {
                     $n = $_
                     $ips = (Get-ClusterNetworkInterface -Node $n.Name -ErrorAction SilentlyContinue | ForEach-Object { $_.Address }) -join ", "
                     [PSCustomObject]@{
@@ -55,16 +50,13 @@ foreach ($def in ($clustersJson.clusters | Where-Object { $_.cluster_type -ne "M
                         DynamicWeight = $n.DynamicWeight
                         IPAddresses   = if ($ips) { $ips } else { "N/A" }
                     }
-                }
-            })
+                })
 
-            # Role — kopia z Untitled6.ps1 / SQLClusterGroupStatus()
-            $roles = @(Invoke-Command -ComputerName $srv -ErrorAction Stop -ScriptBlock {
-                Get-ClusterGroup | ForEach-Object {
+                $roles = @(Get-ClusterGroup | ForEach-Object {
                     $role = $_
                     try {
-                        $resources  = Get-ClusterResource | Where-Object { $_.OwnerGroup -eq $role.Name }
-                        $ipAddr     = ($resources | Where-Object { $_.ResourceType -eq "IP Address" } | ForEach-Object {
+                        $resources = Get-ClusterResource | Where-Object { $_.OwnerGroup -eq $role.Name }
+                        $ipAddr    = ($resources | Where-Object { $_.ResourceType -eq "IP Address" } | ForEach-Object {
                             try { (Get-ClusterParameter -InputObject $_ -Name Address).Value } catch { "N/A" }
                         }) -join ", "
                     } catch { $ipAddr = "N/A" }
@@ -81,14 +73,20 @@ foreach ($def in ($clustersJson.clusters | Where-Object { $_.cluster_type -ne "M
                         OwnerNode   = $role.OwnerNode.ToString()
                         IPAddresses = $ipAddr
                     }
-                }
-            })
+                })
+
+                [PSCustomObject]@{ ClusterName = $clName; Nodes = $nodes; Roles = $roles }
+            }
+
+            # Pomijaj duplikaty (ten sam klaster z drugiego wezla)
+            if ($done[$data.ClusterName]) { Log "    Pomijam (duplikat $($data.ClusterName))"; continue }
+            $done[$data.ClusterName] = $true
 
             $allClusters += [PSCustomObject]@{
-                ClusterName = $clName; ClusterType = $type; Status = "Online"; FQDN = $srv
-                Nodes = $nodes; Roles = $roles; Error = $null
+                ClusterName = $data.ClusterName; ClusterType = $type; Status = "Online"; FQDN = $srv
+                Nodes = @($data.Nodes); Roles = @($data.Roles); Error = $null
             }
-            Log "    OK: $clName ($($nodes.Count) wezlow, $($roles.Count) rol)"
+            Log "    OK: $($data.ClusterName) ($(@($data.Nodes).Count) wezlow, $(@($data.Roles).Count) rol)"
 
         } catch {
             $allClusters += [PSCustomObject]@{
@@ -114,42 +112,39 @@ if ($mqJson) {
         $mqRoles = @()
         $ok = $false
 
-        foreach ($srv in $servers) {
-            # Node status — wzor z MQ_servers.ps1
-            try {
-                $r = Invoke-Command -ComputerName $srv -ErrorAction Stop -ScriptBlock {
-                    $ip = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -like "10.*" } | Select-Object -First 1).IPAddress
-                    [PSCustomObject]@{ RealName = $env:COMPUTERNAME; IP = if ($ip) { $ip } else { "N/A" } }
+        # JEDNO wywolanie na WSZYSTKIE serwery grupy — rownolegle
+        $mqRaw = Invoke-Command -ComputerName $servers -ErrorAction SilentlyContinue -ErrorVariable mqErrors -ScriptBlock {
+            $ip = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -like "10.*" } | Select-Object -First 1).IPAddress
+            $qmgrs = @()
+            $mqData = dspmq 2>$null
+            if ($mqData) {
+                foreach ($line in $mqData) {
+                    if ($line -match 'QMNAME\s*\(\s*(?<name>.*?)\s*\)\s+STATUS\s*\(\s*(?<state>.*?)\s*\)') {
+                        $qmName = $Matches['name'].Trim()
+                        $state  = $Matches['state'].Trim() -replace 'Dzia.+?c[ye]', 'Running'
+                        $port   = ""
+                        if ($state -match 'Running|Dzia') {
+                            $ls = "DISPLAY LSSTATUS(*) PORT" | runmqsc $qmName 2>$null
+                            if ($ls) { foreach ($l in $ls) { if ($l -match 'PORT\s*\(\s*(?<p>\d+)\s*\)') { $port = $Matches['p']; break } } }
+                        }
+                        $qmgrs += [PSCustomObject]@{ Name = $qmName; State = $state; OwnerNode = $env:COMPUTERNAME; IPAddresses = $port }
+                    }
                 }
-                $mqNodes += [PSCustomObject]@{ Name = $r.RealName; State = "Up"; NodeWeight = 1; DynamicWeight = 1; IPAddresses = $r.IP }
-                $ok = $true
-            } catch {
+            }
+            [PSCustomObject]@{ RealName = $env:COMPUTERNAME; IP = if ($ip) { $ip } else { "N/A" }; QMgrs = $qmgrs }
+        }
+
+        foreach ($r in $mqRaw) {
+            $mqNodes += [PSCustomObject]@{ Name = $r.RealName; State = "Up"; NodeWeight = 1; DynamicWeight = 1; IPAddresses = $r.IP }
+            $mqRoles += @($r.QMgrs)
+            $ok = $true
+        }
+        # Serwery ktore nie odpowiedzialy
+        $okSrv = @($mqRaw | ForEach-Object { $_.PSComputerName })
+        foreach ($srv in $servers) {
+            if ($srv -notin $okSrv) {
                 $mqNodes += [PSCustomObject]@{ Name = $srv; State = "Down"; NodeWeight = 1; DynamicWeight = 1; IPAddresses = "Brak" }
                 Log "    FAIL node $srv"
-            }
-
-            # QManager status — wzor z MQ_Qmanagers.ps1
-            try {
-                $qms = @(Invoke-Command -ComputerName $srv -ErrorAction Stop -ScriptBlock {
-                    $mqData = dspmq 2>$null
-                    if ($mqData) {
-                        $mqData | ForEach-Object {
-                            if ($_ -match 'QMNAME\s*\(\s*(?<name>.*?)\s*\)\s+STATUS\s*\(\s*(?<state>.*?)\s*\)') {
-                                $qmName = $Matches['name'].Trim()
-                                $state  = $Matches['state'].Trim() -replace 'Dzia.+?c[ye]', 'Running'
-                                $port   = ""
-                                if ($state -match 'Running|Dzia') {
-                                    $ls = "DISPLAY LSSTATUS(*) PORT" | runmqsc $qmName 2>$null
-                                    if ($ls) { foreach ($l in $ls) { if ($l -match 'PORT\s*\(\s*(?<p>\d+)\s*\)') { $port = $Matches['p']; break } } }
-                                }
-                                [PSCustomObject]@{ Name = $qmName; State = $state; OwnerNode = $env:COMPUTERNAME; IPAddresses = $port }
-                            }
-                        }
-                    }
-                })
-                $mqRoles += $qms
-            } catch {
-                Log "    FAIL dspmq $srv"
             }
         }
 

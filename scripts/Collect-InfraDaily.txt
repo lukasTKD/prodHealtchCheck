@@ -111,47 +111,56 @@ Log "--- Kolejki MQ ---"
 $mqResults = @()
 
 if ($mqJson) {
+    # Zbierz WSZYSTKIE serwery MQ + mapowanie serwer -> grupa
+    $allMQServers = @()
+    $mqGroupMap   = @{}
     foreach ($grp in $mqJson.PSObject.Properties) {
-        $groupName = $grp.Name
-        $servers   = @($grp.Value)
-        Log "  MQ $groupName : $($servers -join ', ')"
+        foreach ($srv in $grp.Value) {
+            $allMQServers += $srv
+            $mqGroupMap[$srv] = $grp.Name
+        }
+    }
+    Log "  MQ serwery: $($allMQServers -join ', ')"
 
-        foreach ($srv in $servers) {
-            try {
-                $mqRaw = Invoke-Command -ComputerName $srv -ErrorAction Stop -ScriptBlock {
-                    $qmgrs = @()
-                    $mqData = dspmq 2>$null
-                    if ($mqData) {
-                        foreach ($line in $mqData) {
-                            if ($line -match 'QMNAME\s*\(\s*(?<name>.*?)\s*\)\s+STATUS\s*\(\s*(?<state>.*?)\s*\)') {
-                                $qmName = $Matches['name'].Trim()
-                                $state  = $Matches['state'].Trim() -replace 'Dzia.+?c[ye]', 'Running'
-                                $port   = ""
-                                $queues = @()
+    # JEDNO wywolanie na WSZYSTKIE serwery MQ — rownolegle
+    $mqRawAll = Invoke-Command -ComputerName $allMQServers -ErrorAction SilentlyContinue -ErrorVariable mqErrs -ScriptBlock {
+        $qmgrs = @()
+        $mqData = dspmq 2>$null
+        if ($mqData) {
+            foreach ($line in $mqData) {
+                if ($line -match 'QMNAME\s*\(\s*(?<name>.*?)\s*\)\s+STATUS\s*\(\s*(?<state>.*?)\s*\)') {
+                    $qmName = $Matches['name'].Trim()
+                    $state  = $Matches['state'].Trim() -replace 'Dzia.+?c[ye]', 'Running'
+                    $port   = ""
+                    $queues = @()
 
-                                if ($state -match 'Running|Dzia') {
-                                    # Port
-                                    $ls = "DISPLAY LSSTATUS(*) PORT" | runmqsc $qmName 2>$null
-                                    if ($ls) { foreach ($l in $ls) { if ($l -match 'PORT\s*\(\s*(?<p>\d+)\s*\)') { $port = $Matches['p']; break } } }
+                    if ($state -match 'Running|Dzia') {
+                        $ls = "DISPLAY LSSTATUS(*) PORT" | runmqsc $qmName 2>$null
+                        if ($ls) { foreach ($l in $ls) { if ($l -match 'PORT\s*\(\s*(?<p>\d+)\s*\)') { $port = $Matches['p']; break } } }
 
-                                    # Kolejki (bez SYSTEM.* i AMQ.*)
-                                    $qd = "DISPLAY QLOCAL(*)" | runmqsc $qmName 2>$null
-                                    if ($qd) { foreach ($q in $qd) { if ($q -match 'QUEUE\s*\(\s*(?<qn>.*?)\s*\)') { $qn = $Matches['qn'].Trim(); if ($qn -notmatch '^SYSTEM\.|^AMQ\.') { $queues += [PSCustomObject]@{ QueueName = $qn } } } } }
-                                }
-
-                                $qmgrs += [PSCustomObject]@{ QueueManager = $qmName; Status = $state; Port = $port; QueueCount = $queues.Count; Queues = $queues }
-                            }
-                        }
+                        $qd = "DISPLAY QLOCAL(*)" | runmqsc $qmName 2>$null
+                        if ($qd) { foreach ($q in $qd) { if ($q -match 'QUEUE\s*\(\s*(?<qn>.*?)\s*\)') { $qn = $Matches['qn'].Trim(); if ($qn -notmatch '^SYSTEM\.|^AMQ\.') { $queues += [PSCustomObject]@{ QueueName = $qn } } } } }
                     }
-                    [PSCustomObject]@{ ServerName = $env:COMPUTERNAME; QueueManagers = $qmgrs }
-                }
 
-                $mqResults += [PSCustomObject]@{ ServerName = $mqRaw.ServerName; Description = $groupName; QueueManagers = @($mqRaw.QueueManagers); Error = $null }
-                Log "    OK: $($mqRaw.ServerName)"
-            } catch {
-                $mqResults += [PSCustomObject]@{ ServerName = $srv; Description = $groupName; QueueManagers = @(); Error = $_.Exception.Message }
-                Log "    FAIL: $srv - $($_.Exception.Message)"
+                    $qmgrs += [PSCustomObject]@{ QueueManager = $qmName; Status = $state; Port = $port; QueueCount = $queues.Count; Queues = $queues }
+                }
             }
+        }
+        [PSCustomObject]@{ ServerName = $env:COMPUTERNAME; QueueManagers = $qmgrs }
+    }
+
+    # Przetwarzanie wynikow
+    foreach ($r in $mqRawAll) {
+        $grpName = $mqGroupMap[$r.PSComputerName]
+        $mqResults += [PSCustomObject]@{ ServerName = $r.ServerName; Description = $grpName; QueueManagers = @($r.QueueManagers); Error = $null }
+        Log "    OK: $($r.ServerName) ($grpName)"
+    }
+    # Serwery ktore nie odpowiedzialy
+    $okMQ = @($mqRawAll | ForEach-Object { $_.PSComputerName })
+    foreach ($srv in $allMQServers) {
+        if ($srv -notin $okMQ) {
+            $mqResults += [PSCustomObject]@{ ServerName = $srv; Description = $mqGroupMap[$srv]; QueueManagers = @(); Error = "Niedostepny" }
+            Log "    FAIL: $srv"
         }
     }
 } else {

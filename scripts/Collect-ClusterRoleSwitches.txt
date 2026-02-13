@@ -31,34 +31,41 @@ if ($clusterServers.Count -eq 0) {
     exit 0
 }
 
-# Krok 1: Pobierz wezly z kazdego klastra
+# Krok 1: Pobierz wezly — jedno Invoke-Command na pierwszy serwer z kazdego klastra
 $nodeMap  = @()
 $done     = @{}
 $allNodes = @()
 
+# Zbierz po jednym serwerze z kazdego klastra (unikamy duplikatow od razu)
+$firstServers = @()
+$srvTypeMap   = @{}
 foreach ($def in $clusterServers) {
-    $type = $def.cluster_type
-    foreach ($srv in $def.servers) {
-        try {
-            $info = Invoke-Command -ComputerName $srv -ErrorAction Stop -ScriptBlock {
-                [PSCustomObject]@{
-                    ClusterName = (Get-Cluster).Name
-                    Nodes       = @(Get-ClusterNode | Select-Object -ExpandProperty Name)
-                }
-            }
-            if ($done[$info.ClusterName]) { continue }
-            $done[$info.ClusterName] = $true
+    $srv = $def.servers[0]
+    $firstServers += $srv
+    $srvTypeMap[$srv] = $def.cluster_type
+}
 
-            foreach ($node in $info.Nodes) {
-                $nodeMap += [PSCustomObject]@{ ClusterName = $info.ClusterName; ClusterType = $type; NodeName = $node }
-                $allNodes += $node
-            }
-            Log "  $($info.ClusterName) ($type): $($info.Nodes.Count) wezlow"
-        } catch {
-            Log "  FAIL: $srv - $($_.Exception.Message)"
-        }
+# Jedno rownolegle wywolanie
+$clusterInfos = Invoke-Command -ComputerName $firstServers -ErrorAction SilentlyContinue -ErrorVariable nodeErrors -ScriptBlock {
+    [PSCustomObject]@{
+        ClusterName = (Get-Cluster).Name
+        Nodes       = @(Get-ClusterNode | Select-Object -ExpandProperty Name)
     }
 }
+
+foreach ($info in $clusterInfos) {
+    $originSrv = $info.PSComputerName
+    $type = $srvTypeMap[$originSrv]
+    if ($done[$info.ClusterName]) { continue }
+    $done[$info.ClusterName] = $true
+
+    foreach ($node in $info.Nodes) {
+        $nodeMap  += [PSCustomObject]@{ ClusterName = $info.ClusterName; ClusterType = $type; NodeName = $node }
+        $allNodes += $node
+    }
+    Log "  $($info.ClusterName) ($type): $($info.Nodes.Count) wezlow"
+}
+foreach ($err in $nodeErrors) { Log "  FAIL: $($err.TargetObject) - $($err.Exception.Message)" }
 
 $allNodes = @($allNodes | Sort-Object -Unique)
 Log "Odpytuje $($allNodes.Count) wezlow..."
