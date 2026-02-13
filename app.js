@@ -679,20 +679,26 @@ function renderSQLInstances(data) {
     grid.innerHTML = instances.map(inst => {
         return `
         <div class="server-card ${inst.Error ? 'error' : ''}" data-server="${inst.ServerName}">
-            <div class="server-name">${inst.ServerName}<span class="dmz-group">${inst.DatabaseCount || 0} baz</span></div>
+            <div class="server-name">${inst.ServerName}</div>
             ${inst.Error ? '<div class="error-message">' + inst.Error + '</div>' : `
+            <div class="metrics-grid" style="margin-bottom:12px">
+                <div class="metric"><div class="metric-label">Wersja SQL</div><div class="metric-value" style="font-size:0.85em">${inst.SQLVersion || 'N/A'}</div></div>
+                <div class="metric"><div class="metric-label">Ilość baz</div><div class="metric-value">${inst.DatabaseCount || 0}</div></div>
+            </div>
             <div class="section">
-                <div class="section-title" style="font-size:0.85em;color:#888;">${inst.SQLVersion || 'N/A'}</div>
-                <div class="infra-table"><table>
-                    <thead><tr><th>Baza danych</th><th>Data (MB)</th><th>Log (MB)</th></tr></thead>
+                <div class="section-title collapsible" onclick="toggleSection(this)">Bazy danych (${inst.DatabaseCount || 0})</div>
+                <div class="collapsible-content"><div class="infra-table"><table>
+                    <thead><tr><th>Baza</th><th>Compat.</th><th>Data (MB)</th><th>Log (MB)</th><th>Razem (MB)</th></tr></thead>
                     <tbody>${(inst.Databases || []).map(db => `
                         <tr>
                             <td><strong>${db.DatabaseName}</strong></td>
+                            <td>${db.CompatibilityLevel || ''}</td>
                             <td>${db.DataFileSizeMB || 0}</td>
                             <td>${db.LogFileSizeMB || 0}</td>
+                            <td><strong>${db.TotalSizeMB || 0}</strong></td>
                         </tr>`).join('')}
                     </tbody>
-                </table></div>
+                </table></div></div>
             </div>`}
         </div>`;
     }).join('');
