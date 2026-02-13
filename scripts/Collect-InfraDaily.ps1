@@ -4,7 +4,7 @@
 
 # --- SCIEZKI ---
 $ScriptDir  = Split-Path $PSScriptRoot -Parent
-$appConfig  = Get-Content "$ScriptDir\app-config.json" -Raw | ConvertFrom-Json
+$appConfig  = (Get-Content "$ScriptDir\app-config.json" -Raw).Trim() | ConvertFrom-Json
 $DataPath   = $appConfig.paths.dataPath
 $ConfigPath = $appConfig.paths.configPath
 $LogsPath   = $appConfig.paths.logsPath
@@ -17,10 +17,15 @@ function Log($msg) { "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') [INFRA] $msg" | 
 
 Log "=== START Collect-InfraDaily ==="
 
-$clustersJson = Get-Content "$ConfigPath\clusters.json" -Raw | ConvertFrom-Json
+$clustersJson = (Get-Content "$ConfigPath\clusters.json" -Raw).Trim() | ConvertFrom-Json
 $mqJson       = $null
 $mqFile       = "$ConfigPath\mq_servers.json"
-if (Test-Path $mqFile) { $mqJson = Get-Content $mqFile -Raw | ConvertFrom-Json }
+if (Test-Path $mqFile) {
+    $mqRaw = (Get-Content $mqFile -Raw).Trim()
+    Log "mq_servers.json: $($mqRaw.Length) znakow z $mqFile"
+    Write-Host "MQ config: $($mqRaw.Length) znakow z $mqFile"
+    $mqJson = $mqRaw | ConvertFrom-Json
+}
 
 
 # ==========================================

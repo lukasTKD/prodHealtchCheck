@@ -3,7 +3,7 @@
 
 # --- SCIEZKI ---
 $ScriptDir  = Split-Path $PSScriptRoot -Parent
-$appConfig  = Get-Content "$ScriptDir\app-config.json" -Raw | ConvertFrom-Json
+$appConfig  = (Get-Content "$ScriptDir\app-config.json" -Raw).Trim() | ConvertFrom-Json
 $DataPath   = $appConfig.paths.dataPath
 $ConfigPath = $appConfig.paths.configPath
 $LogsPath   = $appConfig.paths.logsPath
@@ -19,10 +19,12 @@ function Log($msg) { "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') [ROLE-SWITCH] $m
 
 Log "START"
 
-$clustersJson = Get-Content "$ConfigPath\clusters.json" -Raw | ConvertFrom-Json
+$clustersJson = (Get-Content "$ConfigPath\clusters.json" -Raw).Trim() | ConvertFrom-Json
 
 # Tylko SQL i FileShare — MQ nie maja FailoverClustering
 $clusterServers = @($clustersJson.clusters | Where-Object { $_.cluster_type -ne "MQ" })
+Write-Host "Klastry (SQL+FS): $($clusterServers.Count)"
+foreach ($def in $clusterServers) { Write-Host "  $($def.cluster_type): $($def.servers -join ', ')" }
 
 if ($clusterServers.Count -eq 0) {
     Log "Brak klastrow SQL/FileShare"
@@ -44,6 +46,7 @@ foreach ($def in $clusterServers) {
     $firstServers += $srv
     $srvTypeMap[$srv] = $def.cluster_type
 }
+Write-Host "Odpytuje serwery: $($firstServers -join ', ')"
 
 # Jedno rownolegle wywolanie
 $clusterInfos = Invoke-Command -ComputerName $firstServers -ErrorAction SilentlyContinue -ErrorVariable nodeErrors -ScriptBlock {
@@ -65,9 +68,11 @@ foreach ($info in $clusterInfos) {
     }
     Log "  $($info.ClusterName) ($type): $($info.Nodes.Count) wezlow"
 }
-foreach ($err in $nodeErrors) { Log "  FAIL: $($err.TargetObject) - $($err.Exception.Message)" }
+foreach ($err in $nodeErrors) { Log "  FAIL: $($err.TargetObject) - $($err.Exception.Message)"; Write-Host "  BLAD: $($err.TargetObject) - $($err.Exception.Message)" -ForegroundColor Red }
+Write-Host "Klastry znalezione: $(if ($clusterInfos) { @($clusterInfos).Count } else { 0 })"
 
 $allNodes = @($allNodes | Sort-Object -Unique)
+Write-Host "Wezly ($($allNodes.Count)): $($allNodes -join ', ')"
 Log "Odpytuje $($allNodes.Count) wezlow..."
 
 # Krok 2: Pobierz eventy
@@ -129,6 +134,7 @@ foreach ($s in $switches) {
     $key = "$($s.TimeCreated)|$($s.EventId)|$($s.RoleName)|$($s.ClusterName)"
     if (!$seen[$key]) { $seen[$key] = $true; $unique += $s }
 }
+Write-Host "Eventy: $($switches.Count) surowych, $($unique.Count) unikalnych"
 
 @{
     LastUpdate  = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
