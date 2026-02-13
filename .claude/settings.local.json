@@ -11,7 +11,8 @@
       "Bash(git commit -m \"$\\(cat <<''EOF''\ndodano skrypt do szyfrowania hasel dla DMZ\n\nSkrypt Encrypt-Password.ps1 umozliwia bezpieczne szyfrowanie hasel\ndo uzycia w konfiguracji serverList_DMZ.json\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>\nEOF\n\\)\")",
       "Bash(git commit:*)",
       "Bash(git diff:*)",
-      "Bash(git checkout:*)"
+      "Bash(git checkout:*)",
+      "Bash(if exist \"D:\\\\PROD_REPO_DATA\\\\IIS\\\\prodHealtchCheck\\\\data\\\\clusters.json\" type \"D:\\\\PROD_REPO_DATA\\\\IIS\\\\prodHealtchCheck\\\\data\\\\clusters.json\")"
     ]
   }
 }
