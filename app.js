@@ -86,6 +86,7 @@ function switchTab(group) {
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     document.querySelector('.tab[data-group="' + group + '"]').classList.add('active');
     document.getElementById('serverGrid').innerHTML = '<div class="loading">Ladowanie danych...</div>';
+    document.getElementById('serverGrid').classList.remove('sql-grid');
     document.getElementById('tabSearchBar').innerHTML = '';
 
     // Resetuj filtr krytycznych
@@ -669,8 +670,9 @@ function renderFileShares(data) {
 function renderSQLInstances(data) {
     const searchBar = document.getElementById('tabSearchBar');
     searchBar.innerHTML = '<input type="text" class="tab-search-input" placeholder="Szukaj w instancjach SQL..." onkeyup="filterServers()">';
-    
+
     const grid = document.getElementById('serverGrid');
+    grid.classList.add('sql-grid');
     const instances = data.Instances || [];
     if (instances.length === 0) { grid.innerHTML = '<div class="loading">Brak danych o instancjach SQL</div>'; return; }
 
