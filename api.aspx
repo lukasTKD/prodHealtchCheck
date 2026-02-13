@@ -285,10 +285,112 @@
                 return;
             }
 
-            string infraPath = Path.Combine(paths.dataPath, "infra_" + group + ".json");
-
             try
             {
+                // Dla ClustersWindows - wczytaj wszystkie pliki infra_Clusters*.json
+                if (group == "ClustersWindows")
+                {
+                    string[] clusterFiles = Directory.GetFiles(paths.dataPath, "infra_Clusters*.json");
+
+                    if (clusterFiles.Length == 0)
+                    {
+                        Response.StatusCode = 404;
+                        Response.Write("{\"error\":\"Brak plikow infra_Clusters*.json\"}");
+                        return;
+                    }
+
+                    var serializer = new JavaScriptSerializer();
+                    var allClusters = new System.Collections.Generic.List<object>();
+                    string latestUpdate = "";
+                    double totalDuration = 0;
+                    int onlineCount = 0;
+                    int failedCount = 0;
+                    var loadedFiles = new System.Collections.Generic.List<string>();
+
+                    foreach (string filePath in clusterFiles)
+                    {
+                        try
+                        {
+                            string fileJson = File.ReadAllText(filePath);
+                            var fileData = serializer.Deserialize<System.Collections.Generic.Dictionary<string, object>>(fileJson);
+
+                            // Pobierz LastUpdate
+                            if (fileData.ContainsKey("LastUpdate"))
+                            {
+                                string fileUpdate = fileData["LastUpdate"].ToString();
+                                if (string.Compare(fileUpdate, latestUpdate) > 0)
+                                {
+                                    latestUpdate = fileUpdate;
+                                }
+                            }
+
+                            // Dodaj czas zbierania
+                            if (fileData.ContainsKey("CollectionDuration"))
+                            {
+                                double dur;
+                                if (double.TryParse(fileData["CollectionDuration"].ToString().Replace(",", "."),
+                                    System.Globalization.NumberStyles.Any,
+                                    System.Globalization.CultureInfo.InvariantCulture, out dur))
+                                {
+                                    totalDuration += dur;
+                                }
+                            }
+
+                            // Sumuj OnlineCount i FailedCount
+                            if (fileData.ContainsKey("OnlineCount"))
+                            {
+                                int cnt;
+                                if (int.TryParse(fileData["OnlineCount"].ToString(), out cnt))
+                                {
+                                    onlineCount += cnt;
+                                }
+                            }
+                            if (fileData.ContainsKey("FailedCount"))
+                            {
+                                int cnt;
+                                if (int.TryParse(fileData["FailedCount"].ToString(), out cnt))
+                                {
+                                    failedCount += cnt;
+                                }
+                            }
+
+                            // Pobierz klastry
+                            if (fileData.ContainsKey("Clusters"))
+                            {
+                                var clusters = fileData["Clusters"] as System.Collections.ArrayList;
+                                if (clusters != null)
+                                {
+                                    foreach (var cluster in clusters)
+                                    {
+                                        allClusters.Add(cluster);
+                                    }
+                                }
+                            }
+
+                            loadedFiles.Add(Path.GetFileName(filePath));
+                        }
+                        catch
+                        {
+                            // Ignoruj błędy pojedynczych plików
+                        }
+                    }
+
+                    var result = new System.Collections.Generic.Dictionary<string, object>();
+                    result["LastUpdate"] = latestUpdate;
+                    result["CollectionDuration"] = totalDuration.ToString("F1", System.Globalization.CultureInfo.InvariantCulture);
+                    result["TotalClusters"] = allClusters.Count;
+                    result["OnlineCount"] = onlineCount;
+                    result["FailedCount"] = failedCount;
+                    result["LoadedFiles"] = loadedFiles;
+                    result["Clusters"] = allClusters;
+
+                    Response.Write(serializer.Serialize(result));
+                    return;
+                }
+
+                // Dla pozostałych grup - standardowe wczytywanie pojedynczego pliku
+                string infraPath = Path.Combine(paths.dataPath, "infra_" + group + ".json");
+
                 if (File.Exists(infraPath))
                 {
                     string json = File.ReadAllText(infraPath);

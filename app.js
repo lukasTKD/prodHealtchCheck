@@ -523,10 +523,11 @@ function updateInfraUI() {
     document.getElementById('duration').textContent = infraData.CollectionDuration || '-';
 
     if (currentGroup === 'ClustersWindows') {
+        const loadedFilesCount = (infraData.LoadedFiles || []).length;
         document.getElementById('totalServers').textContent = infraData.TotalClusters || 0;
         document.getElementById('successServers').textContent = infraData.OnlineCount || 0;
         document.getElementById('failedServers').textContent = infraData.FailedCount || 0;
-        document.getElementById('criticalServers').textContent = '-';
+        document.getElementById('criticalServers').textContent = loadedFilesCount > 0 ? loadedFilesCount + ' plikow' : '-';
     } else if (currentGroup === 'UdzialySieciowe') {
         const totalShares = (infraData.FileServers || []).reduce((sum, s) => sum + (s.ShareCount || 0), 0);
         document.getElementById('totalServers').textContent = infraData.TotalServers || 0;
