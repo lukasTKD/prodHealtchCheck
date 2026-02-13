@@ -6,10 +6,33 @@ param(
     [int]$ThrottleLimit = 50
 )
 
-$BasePath = "D:\PROD_REPO_DATA\IIS\prodHealtchCheck"
-$ServerListPath = "$BasePath\serverList_$Group.txt"
-$OutputPath = "$BasePath\data\serverHealth_$Group.json"
-$LogPath = "$BasePath\ServerHealthMonitor.log"
+$ScriptPath = $PSScriptRoot
+$ConfigFile = Join-Path (Split-Path $ScriptPath -Parent) "app-config.json"
+
+# Wczytaj konfigurację
+if (Test-Path $ConfigFile) {
+    $appConfig = Get-Content $ConfigFile -Raw | ConvertFrom-Json
+    $BasePath = $appConfig.paths.basePath
+    $DataPath = $appConfig.paths.dataPath
+    $LogsPath = $appConfig.paths.logsPath
+    $AppConfigPath = $appConfig.paths.configPath
+} else {
+    $BasePath = "D:\PROD_REPO_DATA\IIS\prodHealtchCheck"
+    $DataPath = "$BasePath\data"
+    $LogsPath = "$BasePath\logs"
+    $AppConfigPath = "$BasePath\config"
+}
+
+# Upewnij się że katalogi istnieją
+@($DataPath, $LogsPath) | ForEach-Object {
+    if (-not (Test-Path $_)) {
+        New-Item -ItemType Directory -Path $_ -Force | Out-Null
+    }
+}
+
+$ServerListPath = "$AppConfigPath\serverList_$Group.txt"
+$OutputPath = "$DataPath\serverHealth_$Group.json"
+$LogPath = "$LogsPath\ServerHealthMonitor.log"
 $LogMaxAgeHours = 48
 
 $ErrorActionPreference = "Continue"
@@ -22,7 +45,7 @@ function Write-Log {
     if (Test-Path $LogPath) {
         $logFile = Get-Item $LogPath
         if ($logFile.LastWriteTime -lt (Get-Date).AddHours(-$LogMaxAgeHours)) {
-            $archiveName = "$BasePath\ServerHealthMonitor_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+            $archiveName = "$LogsPath\ServerHealthMonitor_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
             Move-Item $LogPath $archiveName -Force
         }
     }

@@ -3,12 +3,37 @@
 # Collect-InfraDaily.ps1
 # Zbiera dane infrastrukturalne: udziały sieciowe, instancje SQL, kolejki MQ
 # Uruchamiany raz dziennie (np. o 6:00)
+# Udziały sieciowe i instancje SQL czytane są z plików CSV
 # =============================================================================
 
-$BasePath = "D:\PROD_REPO_DATA\IIS\prodHealtchCheck"
-$ClustersConfigPath = "D:\PROD_REPO_DATA\IIS\Cluster\clusters.json"
-$MQConfigPath = "$BasePath\config_mq.json"
-$LogPath = "$BasePath\ServerHealthMonitor.log"
+$ScriptPath = $PSScriptRoot
+$ConfigFile = Join-Path (Split-Path $ScriptPath -Parent) "app-config.json"
+
+# Wczytaj konfigurację
+if (Test-Path $ConfigFile) {
+    $appConfig = Get-Content $ConfigFile -Raw | ConvertFrom-Json
+    $BasePath = $appConfig.paths.basePath
+    $DataPath = $appConfig.paths.dataPath
+    $LogsPath = $appConfig.paths.logsPath
+    $ConfigPath = $appConfig.paths.configPath
+} else {
+    $BasePath = "D:\PROD_REPO_DATA\IIS\prodHealtchCheck"
+    $DataPath = "$BasePath\data"
+    $LogsPath = "$BasePath\logs"
+    $ConfigPath = "$BasePath\config"
+}
+
+# Upewnij się że katalogi istnieją
+@($DataPath, $LogsPath) | ForEach-Object {
+    if (-not (Test-Path $_)) {
+        New-Item -ItemType Directory -Path $_ -Force | Out-Null
+    }
+}
+
+$MQConfigPath = "$ConfigPath\config_mq.json"
+$FileShareCSVPath = "$ConfigPath\fileshare.csv"
+$SQLDetailsCSVPath = "$ConfigPath\sql_db_details.csv"
+$LogPath = "$LogsPath\ServerHealthMonitor.log"
 $LogMaxAgeHours = 48
 
 $ErrorActionPreference = "Continue"
@@ -18,7 +43,7 @@ function Write-Log {
     if (Test-Path $LogPath) {
         $logFile = Get-Item $LogPath
         if ($logFile.LastWriteTime -lt (Get-Date).AddHours(-$LogMaxAgeHours)) {
-            $archiveName = "$BasePath\ServerHealthMonitor_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+            $archiveName = "$LogsPath\ServerHealthMonitor_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
             Move-Item $LogPath $archiveName -Force
         }
     }
@@ -26,86 +51,51 @@ function Write-Log {
     "$timestamp [INFRA] $Message" | Out-File $LogPath -Append -Encoding UTF8
 }
 
-# --- Wczytaj konfigurację klastrów ---
-if (-not (Test-Path $ClustersConfigPath)) {
-    Write-Log "BLAD: Brak pliku konfiguracji: $ClustersConfigPath"
-    exit 1
-}
-
-$config = Get-Content $ClustersConfigPath -Raw | ConvertFrom-Json
-$allClusters = @($config.clusters)
-
-$sqlClusters = @($allClusters | Where-Object { $_.cluster_type -eq "SQL" })
-$fileShareClusters = @($allClusters | Where-Object { $_.cluster_type -eq "FileShare" })
-
 Write-Log "=== START zbierania danych infrastruktury ==="
 $globalStart = Get-Date
 
 # ===================================================================
-# REGION 1: UDZIAŁY SIECIOWE
+# REGION 1: UDZIAŁY SIECIOWE (z pliku CSV)
 # ===================================================================
-Write-Log "--- Udzialy sieciowe ---"
+Write-Log "--- Udzialy sieciowe (z CSV) ---"
 $startShares = Get-Date
 $shareResults = [System.Collections.ArrayList]::new()
 
-# Zbierz listę wszystkich file serwerów
-$fileServers = [System.Collections.ArrayList]::new()
-foreach ($fsCluster in $fileShareClusters) {
-    foreach ($srv in $fsCluster.servers) {
-        [void]$fileServers.Add($srv)
-    }
-}
+if (Test-Path $FileShareCSVPath) {
+    try {
+        $csvData = Import-Csv -Path $FileShareCSVPath -Encoding UTF8
 
-if ($fileServers.Count -gt 0) {
-    # Użyj Invoke-Command do równoległego zbierania udziałów
-    $shareScriptBlock = {
-        $shares = Get-SmbShare -ErrorAction SilentlyContinue |
-            Where-Object { $_.Path -and $_.ShareType -ne 'Special' }
+        # Grupuj po serwerze (kolumna ShareClusterRole lub ServerName)
+        $serverColumn = if ($csvData[0].PSObject.Properties.Name -contains 'ShareClusterRole') { 'ShareClusterRole' }
+                       elseif ($csvData[0].PSObject.Properties.Name -contains 'ServerName') { 'ServerName' }
+                       else { $csvData[0].PSObject.Properties.Name[0] }
 
-        @{
-            ServerName = $env:COMPUTERNAME
-            Shares = @($shares | ForEach-Object {
+        $grouped = $csvData | Group-Object -Property $serverColumn
+
+        foreach ($group in $grouped) {
+            $serverName = $group.Name
+            $shares = @($group.Group | ForEach-Object {
                 @{
-                    ShareName  = $_.Name
-                    SharePath  = $_.Path
-                    ShareState = $_.ShareState.ToString()
+                    ShareName  = $_.ShareName
+                    SharePath  = $_.SharePath
+                    ShareState = if ($_.ShareState) { $_.ShareState } else { "Online" }
                 }
             })
-        }
-    }
 
-    $shareRaw = Invoke-Command -ComputerName $fileServers -ScriptBlock $shareScriptBlock `
-        -ErrorAction SilentlyContinue -ErrorVariable shareErrors
-
-    foreach ($r in $shareRaw) {
-        if ($r.ServerName) {
             [void]$shareResults.Add(@{
-                ServerName = $r.ServerName
-                ShareCount = $r.Shares.Count
-                Shares     = @($r.Shares)
+                ServerName = $serverName
+                ShareCount = $shares.Count
+                Shares     = $shares
                 Error      = $null
             })
-            Write-Log "OK Shares: $($r.ServerName) ($($r.Shares.Count) udzialow)"
+            Write-Log "OK Shares (CSV): $serverName ($($shares.Count) udzialow)"
         }
     }
-
-    # Serwery niedostępne
-    $okServers = @($shareRaw | ForEach-Object { $_.PSComputerName })
-    foreach ($srv in $fileServers) {
-        if ($srv -notin $okServers) {
-            $errMsg = ($shareErrors | Where-Object { $_.TargetObject -eq $srv } |
-                       Select-Object -First 1).Exception.Message
-            [void]$shareResults.Add(@{
-                ServerName = $srv
-                ShareCount = 0
-                Shares     = @()
-                Error      = if ($errMsg) { $errMsg } else { "Timeout/Niedostepny" }
-            })
-            Write-Log "FAIL Shares: $srv"
-        }
+    catch {
+        Write-Log "BLAD: Nie mozna wczytac pliku CSV: $FileShareCSVPath - $($_.Exception.Message)"
     }
 } else {
-    Write-Log "INFO: Brak skonfigurowanych file serwerow"
+    Write-Log "INFO: Brak pliku CSV z udzialami: $FileShareCSVPath"
 }
 
 $sharesDuration = [math]::Round(((Get-Date) - $startShares).TotalSeconds, 1)
@@ -114,130 +104,59 @@ $sharesDuration = [math]::Round(((Get-Date) - $startShares).TotalSeconds, 1)
     CollectionDuration = $sharesDuration
     TotalServers       = $shareResults.Count
     FileServers        = @($shareResults)
-} | ConvertTo-Json -Depth 10 | Out-File "$BasePath\data\infra_UdzialySieciowe.json" -Encoding UTF8 -Force
+} | ConvertTo-Json -Depth 10 | Out-File "$DataPath\infra_UdzialySieciowe.json" -Encoding UTF8 -Force
 Write-Log "Udzialy zapisane (${sharesDuration}s)"
 
 # ===================================================================
-# REGION 2: INSTANCJE SQL
+# REGION 2: INSTANCJE SQL (z pliku CSV)
 # ===================================================================
-Write-Log "--- Instancje SQL ---"
+Write-Log "--- Instancje SQL (z CSV) ---"
 $startSQL = Get-Date
 $sqlResults = [System.Collections.ArrayList]::new()
 
-# Zbierz listę serwerów SQL
-$sqlServers = [System.Collections.ArrayList]::new()
-foreach ($sqlCluster in $sqlClusters) {
-    foreach ($srv in $sqlCluster.servers) {
-        [void]$sqlServers.Add($srv)
-    }
-}
+if (Test-Path $SQLDetailsCSVPath) {
+    try {
+        $csvData = Import-Csv -Path $SQLDetailsCSVPath -Encoding UTF8
 
-if ($sqlServers.Count -gt 0) {
-    $sqlQuery = @"
-SELECT
-    d.name AS DatabaseName,
-    d.state_desc AS State,
-    d.compatibility_level AS CompatibilityLevel,
-    CONVERT(VARCHAR(20), SERVERPROPERTY('ProductVersion')) AS SQLServerVersion,
-    CONVERT(VARCHAR(100), SERVERPROPERTY('Edition')) AS Edition
-FROM sys.databases d
-ORDER BY d.name
-"@
+        # Grupuj po serwerze SQL (kolumna sql_server lub ServerName)
+        $serverColumn = if ($csvData[0].PSObject.Properties.Name -contains 'sql_server') { 'sql_server' }
+                       elseif ($csvData[0].PSObject.Properties.Name -contains 'ServerName') { 'ServerName' }
+                       else { $csvData[0].PSObject.Properties.Name[0] }
 
-    # OPTYMALIZACJA: Równoległe odpytywanie instancji SQL jeśli jest ich więcej niż 1
-    if ($sqlServers.Count -eq 1) {
-        # Pojedyncza instancja - wykonaj synchronicznie
-        $sqlSrv = $sqlServers[0]
-        try {
-            $rawDbs = @(Invoke-Sqlcmd -ServerInstance $sqlSrv -Query $sqlQuery -QueryTimeout 30 -ErrorAction Stop)
-            $databases = @($rawDbs | ForEach-Object {
+        $grouped = $csvData | Group-Object -Property $serverColumn
+
+        foreach ($group in $grouped) {
+            $serverName = $group.Name
+            $firstRow = $group.Group[0]
+
+            # Pobierz wersję SQL i edycję z pierwszego wiersza
+            $sqlVersion = if ($firstRow.PSObject.Properties.Name -contains 'SQLServerVersion') { $firstRow.SQLServerVersion } else { "N/A" }
+            $edition = if ($firstRow.PSObject.Properties.Name -contains 'Edition') { $firstRow.Edition } else { "N/A" }
+
+            $databases = @($group.Group | ForEach-Object {
                 @{
                     DatabaseName       = $_.DatabaseName
-                    State              = $_.State
-                    CompatibilityLevel = [int]$_.CompatibilityLevel
+                    State              = if ($_.State) { $_.State } else { "ONLINE" }
+                    CompatibilityLevel = if ($_.CompatibilityLevel) { [int]$_.CompatibilityLevel } else { 0 }
                 }
             })
-            $sqlVersion = if ($rawDbs.Count -gt 0) { $rawDbs[0].SQLServerVersion } else { "N/A" }
-            $edition    = if ($rawDbs.Count -gt 0) { $rawDbs[0].Edition } else { "N/A" }
+
             [void]$sqlResults.Add(@{
-                ServerName    = $sqlSrv
+                ServerName    = $serverName
                 SQLVersion    = $sqlVersion
                 Edition       = $edition
                 DatabaseCount = $databases.Count
                 Databases     = $databases
                 Error         = $null
             })
-            Write-Log "OK SQL: $sqlSrv ($($databases.Count) baz)"
-        }
-        catch {
-            [void]$sqlResults.Add(@{
-                ServerName    = $sqlSrv
-                SQLVersion    = "N/A"
-                Edition       = "N/A"
-                DatabaseCount = 0
-                Databases     = @()
-                Error         = $_.Exception.Message
-            })
-            Write-Log "FAIL SQL: $sqlSrv - $($_.Exception.Message)"
-        }
-    } else {
-        # Wiele instancji - użyj Start-Job dla równoległości
-        $sqlJobs = @()
-        $sqlScriptBlock = {
-            param($sqlSrv, $sqlQuery)
-            try {
-                $rawDbs = @(Invoke-Sqlcmd -ServerInstance $sqlSrv -Query $sqlQuery -QueryTimeout 30 -ErrorAction Stop)
-                $databases = @($rawDbs | ForEach-Object {
-                    @{
-                        DatabaseName       = $_.DatabaseName
-                        State              = $_.State
-                        CompatibilityLevel = [int]$_.CompatibilityLevel
-                    }
-                })
-                $sqlVersion = if ($rawDbs.Count -gt 0) { $rawDbs[0].SQLServerVersion } else { "N/A" }
-                $edition    = if ($rawDbs.Count -gt 0) { $rawDbs[0].Edition } else { "N/A" }
-                @{
-                    Success       = $true
-                    ServerName    = $sqlSrv
-                    SQLVersion    = $sqlVersion
-                    Edition       = $edition
-                    DatabaseCount = $databases.Count
-                    Databases     = $databases
-                    Error         = $null
-                }
-            }
-            catch {
-                @{
-                    Success       = $false
-                    ServerName    = $sqlSrv
-                    SQLVersion    = "N/A"
-                    Edition       = "N/A"
-                    DatabaseCount = 0
-                    Databases     = @()
-                    Error         = $_.Exception.Message
-                }
-            }
-        }
-
-        foreach ($sqlSrv in $sqlServers) {
-            $sqlJobs += Start-Job -ScriptBlock $sqlScriptBlock -ArgumentList $sqlSrv, $sqlQuery
-        }
-
-        # Czekaj na zakończenie wszystkich zadań
-        $sqlJobs | Wait-Job | ForEach-Object {
-            $result = Receive-Job $_
-            Remove-Job $_
-            
-            if ($result.Success) {
-                Write-Log "OK SQL: $($result.ServerName) ($($result.DatabaseCount) baz)"
-            } else {
-                Write-Log "FAIL SQL: $($result.ServerName) - $($result.Error)"
-            }
-            [void]$sqlResults.Add($result)
+            Write-Log "OK SQL (CSV): $serverName ($($databases.Count) baz)"
         }
     }
+    catch {
+        Write-Log "BLAD: Nie mozna wczytac pliku CSV: $SQLDetailsCSVPath - $($_.Exception.Message)"
+    }
 } else {
-    Write-Log "INFO: Brak skonfigurowanych serwerow SQL"
+    Write-Log "INFO: Brak pliku CSV z instancjami SQL: $SQLDetailsCSVPath"
 }
 
 $sqlDuration = [math]::Round(((Get-Date) - $startSQL).TotalSeconds, 1)
@@ -246,11 +165,11 @@ $sqlDuration = [math]::Round(((Get-Date) - $startSQL).TotalSeconds, 1)
     CollectionDuration = $sqlDuration
     TotalInstances     = $sqlResults.Count
     Instances          = @($sqlResults)
-} | ConvertTo-Json -Depth 10 | Out-File "$BasePath\data\infra_InstancjeSQL.json" -Encoding UTF8 -Force
+} | ConvertTo-Json -Depth 10 | Out-File "$DataPath\infra_InstancjeSQL.json" -Encoding UTF8 -Force
 Write-Log "SQL zapisane (${sqlDuration}s)"
 
 # ===================================================================
-# REGION 3: KOLEJKI MQ
+# REGION 3: KOLEJKI MQ (odpytywanie serwerów - bez zmian)
 # ===================================================================
 Write-Log "--- Kolejki MQ ---"
 $startMQ = Get-Date
@@ -373,7 +292,7 @@ $mqDuration = [math]::Round(((Get-Date) - $startMQ).TotalSeconds, 1)
     CollectionDuration = $mqDuration
     TotalServers  = $mqResults.Count
     Servers       = @($mqResults)
-} | ConvertTo-Json -Depth 10 | Out-File "$BasePath\data\infra_KolejkiMQ.json" -Encoding UTF8 -Force
+} | ConvertTo-Json -Depth 10 | Out-File "$DataPath\infra_KolejkiMQ.json" -Encoding UTF8 -Force
 Write-Log "MQ zapisane (${mqDuration}s)"
 
 # ===================================================================

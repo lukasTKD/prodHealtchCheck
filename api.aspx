@@ -2,15 +2,58 @@
 <%@ Import Namespace="System.IO" %>
 <%@ Import Namespace="System.Text.RegularExpressions" %>
 <%@ Import Namespace="System.Diagnostics" %>
+<%@ Import Namespace="System.Web.Script.Serialization" %>
 
 <script runat="server">
+    // Klasa do deserializacji app-config.json
+    public class AppPaths
+    {
+        public string basePath { get; set; }
+        public string dataPath { get; set; }
+        public string logsPath { get; set; }
+        public string configPath { get; set; }
+        public string eventLogsPath { get; set; }
+    }
+
+    public class AppConfig
+    {
+        public AppPaths paths { get; set; }
+    }
+
+    // Pobierz ścieżki z app-config.json
+    private AppPaths GetPaths()
+    {
+        string configPath = Server.MapPath("~/app-config.json");
+        if (File.Exists(configPath))
+        {
+            try
+            {
+                string json = File.ReadAllText(configPath);
+                var serializer = new JavaScriptSerializer();
+                var config = serializer.Deserialize<AppConfig>(json);
+                return config.paths;
+            }
+            catch { }
+        }
+
+        // Domyślne ścieżki
+        return new AppPaths
+        {
+            basePath = @"D:\PROD_REPO_DATA\IIS\prodHealtchCheck",
+            dataPath = @"D:\PROD_REPO_DATA\IIS\prodHealtchCheck\data",
+            logsPath = @"D:\PROD_REPO_DATA\IIS\prodHealtchCheck\logs",
+            configPath = @"D:\PROD_REPO_DATA\IIS\prodHealtchCheck\config",
+            eventLogsPath = @"D:\PROD_REPO_DATA\IIS\prodHealtchCheck\EventLogs"
+        };
+    }
+
     protected void Page_Load(object sender, EventArgs e)
     {
         Response.ContentType = "application/json";
         Response.Cache.SetCacheability(HttpCacheability.NoCache);
 
+        var paths = GetPaths();
         string action = Request.QueryString["action"];
-
         string taskName = "Update II prodHealtchCheck";
 
         // =====================================================================
@@ -20,10 +63,10 @@
         {
             try
             {
-                string configPath = @"D:\PROD_REPO_DATA\IIS\prodHealtchCheck\EventLogsConfig.json";
-                if (File.Exists(configPath))
+                string eventLogsConfigPath = Path.Combine(paths.configPath, "EventLogsConfig.json");
+                if (File.Exists(eventLogsConfigPath))
                 {
-                    Response.Write(File.ReadAllText(configPath));
+                    Response.Write(File.ReadAllText(eventLogsConfigPath));
                 }
                 else
                 {
@@ -40,8 +83,6 @@
 
         // =====================================================================
         // Endpoint: getLogs - pobiera logi Windows Event Log z serwerów
-        // Każde żądanie jest niezależne (stateless) - wielu użytkowników
-        // może jednocześnie pobierać logi bez wzajemnych interferencji.
         // =====================================================================
         if (action == "getLogs")
         {
@@ -79,7 +120,7 @@
                 string srvName = srv.Trim();
                 if (string.IsNullOrEmpty(srvName)) continue;
 
-                // Walidacja nazwy serwera - tylko litery, cyfry, myślniki, podkreślenia, kropki
+                // Walidacja nazwy serwera
                 if (!Regex.IsMatch(srvName, @"^[a-zA-Z0-9\-_\.]+$"))
                 {
                     continue;
@@ -88,12 +129,11 @@
                 if (!first) jsonBuilder.Append(",");
                 first = false;
 
-                // Escape nazwy serwera dla JSON
                 jsonBuilder.Append("\"" + srvName.Replace("\"", "\\\"") + "\":");
 
                 try
                 {
-                    // Escape logType dla PowerShell - zamień ' na ''
+                    // Escape logType dla PowerShell
                     string safeLogType = logType.Replace("'", "''");
 
                     ProcessStartInfo logPsi = new ProcessStartInfo();
@@ -107,7 +147,7 @@
                     Process logProcess = Process.Start(logPsi);
                     string logOutput = logProcess.StandardOutput.ReadToEnd();
                     string logError = logProcess.StandardError.ReadToEnd();
-                    logProcess.WaitForExit(120000); // 2 min timeout per server
+                    logProcess.WaitForExit(120000);
 
                     if (logProcess.ExitCode != 0 && !string.IsNullOrEmpty(logError))
                     {
@@ -119,21 +159,6 @@
                     {
                         string logs = string.IsNullOrWhiteSpace(logOutput) ? "[]" : logOutput.Trim();
                         jsonBuilder.Append("{\"success\":true,\"logs\":" + logs + "}");
-
-                        // Zapis logów do pliku
-                        try
-                        {
-                            string eventLogsDir = @"D:\PROD_REPO_DATA\IIS\prodHealtchCheck\EventLogs";
-                            if (!Directory.Exists(eventLogsDir))
-                            {
-                                Directory.CreateDirectory(eventLogsDir);
-                            }
-                            string timestamp = DateTime.Now.ToString("yyyyMMdd_HHmmss");
-                            string fileName = srvName + "_" + logType.Replace("/", "_").Replace(" ", "_") + "_" + timestamp + ".json";
-                            string filePath = Path.Combine(eventLogsDir, fileName);
-                            File.WriteAllText(filePath, logs);
-                        }
-                        catch { /* Zapis opcjonalny - ignoruj bledy */ }
                     }
                 }
                 catch (Exception ex)
@@ -171,7 +196,6 @@
                     return;
                 }
 
-                // Zwroc status: Ready, Running, Disabled, Queued
                 Response.Write("{\"status\":\"ok\",\"taskState\":\"" + output + "\"}");
             }
             catch (Exception ex)
@@ -186,7 +210,6 @@
         {
             try
             {
-                // Sprawdz status taska przez PowerShell
                 ProcessStartInfo checkPsi = new ProcessStartInfo();
                 checkPsi.FileName = "powershell.exe";
                 checkPsi.Arguments = "-NoProfile -Command \"(Get-ScheduledTask -TaskName '" + taskName + "').State\"";
@@ -206,17 +229,14 @@
                     return;
                 }
 
-                // Running - task juz dziala
                 if (taskState.Equals("Running", StringComparison.OrdinalIgnoreCase))
                 {
                     Response.Write("{\"status\":\"running\",\"message\":\"Task juz dziala\"}");
                     return;
                 }
 
-                // Ready - mozna uruchomic
                 if (taskState.Equals("Ready", StringComparison.OrdinalIgnoreCase))
                 {
-                    // Uruchom task
                     ProcessStartInfo runPsi = new ProcessStartInfo();
                     runPsi.FileName = "schtasks.exe";
                     runPsi.Arguments = "/Run /TN \"" + taskName + "\"";
@@ -241,7 +261,6 @@
                     return;
                 }
 
-                // Inny status (Disabled, Queued, itp.)
                 Response.Write("{\"status\":\"blocked\",\"message\":\"Task nie jest gotowy do uruchomienia\",\"taskState\":\"" + taskState + "\"}");
             }
             catch (Exception ex)
@@ -258,7 +277,6 @@
         // Obsługa danych infrastrukturalnych
         if (type == "infra")
         {
-            // Walidacja nazwy grupy infra - tylko litery
             if (string.IsNullOrEmpty(group) || !Regex.IsMatch(group, "^[a-zA-Z]+$"))
             {
                 Response.StatusCode = 400;
@@ -266,7 +284,7 @@
                 return;
             }
 
-            string infraPath = @"D:\PROD_REPO_DATA\IIS\prodHealtchCheck\data\infra_" + group + ".json";
+            string infraPath = Path.Combine(paths.dataPath, "infra_" + group + ".json");
 
             try
             {
@@ -289,13 +307,13 @@
             return;
         }
 
-        // Walidacja nazwy grupy - tylko litery
+        // Walidacja nazwy grupy
         if (string.IsNullOrEmpty(group) || !Regex.IsMatch(group, "^[a-zA-Z]+$"))
         {
             group = "DCI";
         }
 
-        string jsonPath = @"D:\PROD_REPO_DATA\IIS\prodHealtchCheck\data\serverHealth_" + group + ".json";
+        string jsonPath = Path.Combine(paths.dataPath, "serverHealth_" + group + ".json");
 
         try
         {

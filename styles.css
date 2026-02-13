@@ -764,6 +764,103 @@ mark.search-highlight {
 }
 
 /* =============================================================================
+   ROLE SWITCHES - historia przełączeń ról klastrów
+   ============================================================================= */
+.role-switches-container {
+    grid-column: 1 / -1;
+    background: white;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+    overflow: hidden;
+}
+
+#roleSwitchesTable {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+#roleSwitchesTable thead {
+    background: #E60000;
+    color: white;
+}
+
+#roleSwitchesTable th {
+    padding: 12px 15px;
+    text-align: left;
+    font-weight: 600;
+    cursor: pointer;
+    user-select: none;
+    white-space: nowrap;
+}
+
+#roleSwitchesTable th:hover {
+    background: #c50000;
+}
+
+#roleSwitchesTable th .sort-indicator {
+    margin-left: 5px;
+    font-size: 0.8em;
+}
+
+#roleSwitchesTable td {
+    padding: 10px 15px;
+    border-bottom: 1px solid #eee;
+}
+
+#roleSwitchesTable tbody tr:hover {
+    background-color: #f5f5f5;
+}
+
+.cluster-type-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.85em;
+    background-color: #e0e0e0;
+    color: #333;
+}
+
+.event-type-badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-size: 0.85em;
+    background-color: #e0e0e0;
+    color: #333;
+}
+
+.event-type-badge.event-error {
+    background-color: #ffebee;
+    color: #c62828;
+}
+
+.event-type-badge.event-warning {
+    background-color: #fff3e0;
+    color: #e65100;
+}
+
+.event-type-badge.event-success {
+    background-color: #e8f5e9;
+    color: #2e7d32;
+}
+
+#roleSwitchesTable tbody tr.event-error {
+    background-color: #fff5f5;
+}
+
+#roleSwitchesTable tbody tr.event-warning {
+    background-color: #fffbf0;
+}
+
+#roleSwitchesTable tbody tr.event-success {
+    background-color: #f5fff5;
+}
+
+#roleSwitchesTable tbody tr.highlight-row {
+    background-color: #FFF9C4 !important;
+}
+
+/* =============================================================================
    LOGS VIEWER - przeglądarka logów systemowych
    ============================================================================= */
 .logs-viewer {

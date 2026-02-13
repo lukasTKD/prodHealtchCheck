@@ -1,0 +1,73 @@
+{
+  "paths": {
+    "basePath": "D:\\PROD_REPO_DATA\\IIS\\prodHealtchCheck",
+    "dataPath": "D:\\PROD_REPO_DATA\\IIS\\prodHealtchCheck\\data",
+    "logsPath": "D:\\PROD_REPO_DATA\\IIS\\prodHealtchCheck\\logs",
+    "configPath": "D:\\PROD_REPO_DATA\\IIS\\prodHealtchCheck\\config",
+    "eventLogsPath": "D:\\PROD_REPO_DATA\\IIS\\prodHealtchCheck\\EventLogs"
+  },
+  "scripts": {
+    "Collect-AllGroups": {
+      "description": "Skrypt zbiorczy uruchamiający zbieranie danych dla wszystkich grup",
+      "logFile": "ServerHealthMonitor.log"
+    },
+    "Collect-ServerHealth": {
+      "description": "Zbiera kondycję serwerów LAN",
+      "sourceFile": "serverList_{Group}.txt",
+      "destFile": "serverHealth_{Group}.json"
+    },
+    "Collect-ServerHealth-DMZ": {
+      "description": "Zbiera kondycję serwerów DMZ",
+      "sourceFile": "serverList_DMZ.json",
+      "destFile": "serverHealth_DMZ.json"
+    },
+    "Collect-ClusterStatus": {
+      "description": "Zbiera status klastrów Windows",
+      "sourceFile": "clusters.json",
+      "destFile": "infra_ClustersWindows.json"
+    },
+    "Collect-InfraDaily": {
+      "description": "Zbiera dane infrastrukturalne raz dziennie",
+      "sources": {
+        "fileShares": "fileshare.csv",
+        "sqlInstances": "sql_db_details.csv",
+        "mqConfig": "config_mq.json"
+      },
+      "destinations": {
+        "fileShares": "infra_UdzialySieciowe.json",
+        "sqlInstances": "infra_InstancjeSQL.json",
+        "mqQueues": "infra_KolejkiMQ.json"
+      }
+    },
+    "Collect-ClusterRoleSwitches": {
+      "description": "Zbiera historię przełączeń ról klastrów",
+      "sourceFile": "clusters.json",
+      "destFile": "infra_PrzelaczeniaRol.json"
+    },
+    "GetLogs": {
+      "description": "Pobiera logi Windows Event Log",
+      "destPath": "EventLogs"
+    }
+  },
+  "tabs": {
+    "serverHealth": [
+      { "id": "DCI", "label": "DCI", "dataFile": "serverHealth_DCI.json" },
+      { "id": "Ferryt", "label": "Ferryt", "dataFile": "serverHealth_Ferryt.json" },
+      { "id": "MarketPlanet", "label": "MarketPlanet", "dataFile": "serverHealth_MarketPlanet.json" },
+      { "id": "MQ", "label": "MQ", "dataFile": "serverHealth_MQ.json" },
+      { "id": "FileTransfer", "label": "FileTransfer", "dataFile": "serverHealth_FileTransfer.json" },
+      { "id": "Klastry", "label": "Klastrowe", "dataFile": "serverHealth_Klastry.json" },
+      { "id": "DMZ", "label": "DMZ", "dataFile": "serverHealth_DMZ.json" }
+    ],
+    "infrastructure": [
+      { "id": "ClustersWindows", "label": "Klastry Windows", "dataFile": "infra_ClustersWindows.json" },
+      { "id": "UdzialySieciowe", "label": "Udzialy sieciowe", "dataFile": "infra_UdzialySieciowe.json" },
+      { "id": "InstancjeSQL", "label": "Instancje SQL", "dataFile": "infra_InstancjeSQL.json" },
+      { "id": "KolejkiMQ", "label": "Kolejki MQ", "dataFile": "infra_KolejkiMQ.json" },
+      { "id": "PrzelaczeniaRol", "label": "Przelaczenia rol", "dataFile": "infra_PrzelaczeniaRol.json" }
+    ],
+    "logs": [
+      { "id": "LogiEventLog", "label": "Event Log", "configFile": "EventLogsConfig.json" }
+    ]
+  }
+}

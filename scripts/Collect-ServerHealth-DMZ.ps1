@@ -3,10 +3,33 @@ param(
     [int]$ThrottleLimit = 50
 )
 
-$BasePath = "D:\PROD_REPO_DATA\IIS\prodHealtchCheck"
-$ConfigPath = "$BasePath\serverList_DMZ.json"
-$OutputPath = "$BasePath\data\serverHealth_DMZ.json"
-$LogPath = "$BasePath\ServerHealthMonitor.log"
+$ScriptPath = $PSScriptRoot
+$ConfigFile = Join-Path (Split-Path $ScriptPath -Parent) "app-config.json"
+
+# Wczytaj konfigurację
+if (Test-Path $ConfigFile) {
+    $appConfig = Get-Content $ConfigFile -Raw | ConvertFrom-Json
+    $BasePath = $appConfig.paths.basePath
+    $DataPath = $appConfig.paths.dataPath
+    $LogsPath = $appConfig.paths.logsPath
+    $AppConfigPath = $appConfig.paths.configPath
+} else {
+    $BasePath = "D:\PROD_REPO_DATA\IIS\prodHealtchCheck"
+    $DataPath = "$BasePath\data"
+    $LogsPath = "$BasePath\logs"
+    $AppConfigPath = "$BasePath\config"
+}
+
+# Upewnij się że katalogi istnieją
+@($DataPath, $LogsPath) | ForEach-Object {
+    if (-not (Test-Path $_)) {
+        New-Item -ItemType Directory -Path $_ -Force | Out-Null
+    }
+}
+
+$ConfigPath = "$AppConfigPath\serverList_DMZ.json"
+$OutputPath = "$DataPath\serverHealth_DMZ.json"
+$LogPath = "$LogsPath\ServerHealthMonitor.log"
 $LogMaxAgeHours = 48
 
 $ErrorActionPreference = "Continue"
@@ -19,7 +42,7 @@ function Write-Log {
     if (Test-Path $LogPath) {
         $logFile = Get-Item $LogPath
         if ($logFile.LastWriteTime -lt (Get-Date).AddHours(-$LogMaxAgeHours)) {
-            $archiveName = "$BasePath\ServerHealthMonitor_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+            $archiveName = "$LogsPath\ServerHealthMonitor_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
             Move-Item $LogPath $archiveName -Force
         }
     }
@@ -230,12 +253,6 @@ $serversJson = ($sortedList | ForEach-Object { $_ | ConvertTo-Json -Depth 10 -Co
 $json = @"
 {"LastUpdate":"$((Get-Date).ToString("yyyy-MM-dd HH:mm:ss"))","CollectionDuration":$duration,"TotalServers":$totalServers,"SuccessCount":$totalOk,"FailedCount":$totalFail,"Group":"DMZ","Servers":[$serversJson]}
 "@
-
-# Upewnij sie, ze folder data istnieje
-$dataFolder = Split-Path $OutputPath -Parent
-if (-not (Test-Path $dataFolder)) {
-    New-Item -ItemType Directory -Path $dataFolder -Force | Out-Null
-}
 
 $json | Out-File $OutputPath -Encoding UTF8 -Force
 

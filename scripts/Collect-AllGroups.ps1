@@ -1,9 +1,28 @@
 #Requires -Version 5.1
+# =============================================================================
+# Collect-AllGroups.ps1
 # Skrypt zbiorczy - uruchamia zbieranie danych dla wszystkich grup
+# =============================================================================
 
 $ScriptPath = $PSScriptRoot
-$BasePath = "D:\PROD_REPO_DATA\IIS\prodHealtchCheck"
-$LogPath = "$BasePath\ServerHealthMonitor.log"
+$ConfigFile = Join-Path (Split-Path $ScriptPath -Parent) "app-config.json"
+
+# Wczytaj konfigurację
+if (Test-Path $ConfigFile) {
+    $appConfig = Get-Content $ConfigFile -Raw | ConvertFrom-Json
+    $BasePath = $appConfig.paths.basePath
+    $LogsPath = $appConfig.paths.logsPath
+} else {
+    $BasePath = "D:\PROD_REPO_DATA\IIS\prodHealtchCheck"
+    $LogsPath = "$BasePath\logs"
+}
+
+# Upewnij się że katalog logów istnieje
+if (-not (Test-Path $LogsPath)) {
+    New-Item -ItemType Directory -Path $LogsPath -Force | Out-Null
+}
+
+$LogPath = "$LogsPath\ServerHealthMonitor.log"
 $LogMaxAgeHours = 48
 
 $Groups = @("DCI", "Ferryt", "MarketPlanet", "MQ", "FileTransfer", "Klastry")
@@ -15,7 +34,7 @@ function Write-Log {
     if (Test-Path $LogPath) {
         $logFile = Get-Item $LogPath
         if ($logFile.LastWriteTime -lt (Get-Date).AddHours(-$LogMaxAgeHours)) {
-            $archiveName = "$BasePath\ServerHealthMonitor_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+            $archiveName = "$LogsPath\ServerHealthMonitor_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
             Move-Item $LogPath $archiveName -Force
         }
     }
@@ -25,20 +44,36 @@ function Write-Log {
 }
 
 Write-Log "=== START zbierania dla wszystkich grup ==="
+Write-Log "Konfiguracja: BasePath=$BasePath, LogsPath=$LogsPath"
 
 # Grupy LAN
 foreach ($Group in $Groups) {
-    Write-Log "Uruchamiam: $Group"
-    & "$ScriptPath\Collect-ServerHealth.ps1" -Group $Group
+    Write-Log "Uruchamiam: Collect-ServerHealth.ps1 -Group $Group"
+    try {
+        & "$ScriptPath\Collect-ServerHealth.ps1" -Group $Group
+        Write-Log "Zakonczono: Collect-ServerHealth.ps1 -Group $Group"
+    } catch {
+        Write-Log "BLAD: Collect-ServerHealth.ps1 -Group $Group - $($_.Exception.Message)"
+    }
 }
 
 # Grupa DMZ
-Write-Log "Uruchamiam: DMZ"
-& "$ScriptPath\Collect-ServerHealth-DMZ.ps1"
+Write-Log "Uruchamiam: Collect-ServerHealth-DMZ.ps1"
+try {
+    & "$ScriptPath\Collect-ServerHealth-DMZ.ps1"
+    Write-Log "Zakonczono: Collect-ServerHealth-DMZ.ps1"
+} catch {
+    Write-Log "BLAD: Collect-ServerHealth-DMZ.ps1 - $($_.Exception.Message)"
+}
 
 # Status klastrów Windows (co 5 min razem z kondycją serwerów)
-Write-Log "Uruchamiam: Klastry Windows"
-& "$ScriptPath\Collect-ClusterStatus.ps1"
+Write-Log "Uruchamiam: Collect-ClusterStatus.ps1"
+try {
+    & "$ScriptPath\Collect-ClusterStatus.ps1"
+    Write-Log "Zakonczono: Collect-ClusterStatus.ps1"
+} catch {
+    Write-Log "BLAD: Collect-ClusterStatus.ps1 - $($_.Exception.Message)"
+}
 
 Write-Log "=== KONIEC zbierania dla wszystkich grup ==="
 

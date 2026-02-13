@@ -5,10 +5,33 @@
 # Uruchamiany co 5 minut (razem z Collect-AllGroups.ps1)
 # =============================================================================
 
-$BasePath = "D:\PROD_REPO_DATA\IIS\prodHealtchCheck"
-$ClustersConfigPath = "D:\PROD_REPO_DATA\IIS\Cluster\clusters.json"
-$OutputPath = "$BasePath\data\infra_ClustersWindows.json"
-$LogPath = "$BasePath\ServerHealthMonitor.log"
+$ScriptPath = $PSScriptRoot
+$ConfigFile = Join-Path (Split-Path $ScriptPath -Parent) "app-config.json"
+
+# Wczytaj konfigurację
+if (Test-Path $ConfigFile) {
+    $appConfig = Get-Content $ConfigFile -Raw | ConvertFrom-Json
+    $BasePath = $appConfig.paths.basePath
+    $DataPath = $appConfig.paths.dataPath
+    $LogsPath = $appConfig.paths.logsPath
+    $ConfigPath = $appConfig.paths.configPath
+} else {
+    $BasePath = "D:\PROD_REPO_DATA\IIS\prodHealtchCheck"
+    $DataPath = "$BasePath\data"
+    $LogsPath = "$BasePath\logs"
+    $ConfigPath = "$BasePath\config"
+}
+
+# Upewnij się że katalogi istnieją
+@($DataPath, $LogsPath) | ForEach-Object {
+    if (-not (Test-Path $_)) {
+        New-Item -ItemType Directory -Path $_ -Force | Out-Null
+    }
+}
+
+$ClustersConfigPath = "$ConfigPath\clusters.json"
+$OutputPath = "$DataPath\infra_ClustersWindows.json"
+$LogPath = "$LogsPath\ServerHealthMonitor.log"
 $LogMaxAgeHours = 48
 
 $ErrorActionPreference = "Continue"
@@ -18,7 +41,7 @@ function Write-Log {
     if (Test-Path $LogPath) {
         $logFile = Get-Item $LogPath
         if ($logFile.LastWriteTime -lt (Get-Date).AddHours(-$LogMaxAgeHours)) {
-            $archiveName = "$BasePath\ServerHealthMonitor_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
+            $archiveName = "$LogsPath\ServerHealthMonitor_$(Get-Date -Format 'yyyyMMdd_HHmmss').log"
             Move-Item $LogPath $archiveName -Force
         }
     }
@@ -58,7 +81,7 @@ $maxThreads = [Math]::Min($clusterList.Count, 10)  # Max 10 równoległych poł�
 
 $scriptBlock = {
     param($clusterFQDN, $clusterType)
-    
+
     try {
         # Pobierz nazwę klastra
         $clusterObj = Get-Cluster -Name $clusterFQDN -ErrorAction Stop
@@ -97,7 +120,7 @@ $scriptBlock = {
         # OPTYMALIZACJA: Batch pobieranie parametrów IP - filtruj tylko IP Address resources
         $ipResources = @($allResources | Where-Object { $_.ResourceType -eq "IP Address" })
         $ipParams = @{}
-        
+
         # Użyj pipeline zamiast foreach dla lepszej wydajności
         $ipResources | ForEach-Object {
             try {
@@ -164,12 +187,12 @@ if ($clusterList.Count -eq 1) {
     foreach ($cluster in $clusterList) {
         $jobs += Start-Job -ScriptBlock $scriptBlock -ArgumentList $cluster.FQDN, $cluster.Type
     }
-    
+
     # Czekaj na zakończenie wszystkich zadań
     $jobs | Wait-Job | ForEach-Object {
         $result = Receive-Job $_
         Remove-Job $_
-        
+
         if ($result.Success) {
             Write-Log "OK: $($result.ClusterName) ($($result.ClusterType)) - $($result.Nodes.Count) wezlow, $($result.Roles.Count) rol"
         } else {

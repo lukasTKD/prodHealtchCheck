@@ -8,10 +8,11 @@ let currentGroup = 'DCI';
 
 // Zakładki infrastrukturalne
 const infraTabs = {
-    ClustersWindows: { renderer: renderClusters },
-    UdzialySieciowe: { renderer: renderFileShares },
-    InstancjeSQL:    { renderer: renderSQLInstances },
-    KolejkiMQ:      { renderer: renderMQQueues }
+    ClustersWindows:  { renderer: renderClusters },
+    UdzialySieciowe:  { renderer: renderFileShares },
+    InstancjeSQL:     { renderer: renderSQLInstances },
+    KolejkiMQ:        { renderer: renderMQQueues },
+    PrzelaczeniaRol:  { renderer: renderRoleSwitches }
 };
 
 // Zakładka logów
@@ -517,6 +518,11 @@ function updateInfraUI() {
         document.getElementById('successServers').textContent = totalQM;
         document.getElementById('failedServers').textContent = (infraData.Servers || []).filter(s => s.Error).length;
         document.getElementById('criticalServers').textContent = '-';
+    } else if (currentGroup === 'PrzelaczeniaRol') {
+        document.getElementById('totalServers').textContent = infraData.TotalEvents || 0;
+        document.getElementById('successServers').textContent = infraData.DaysBack || 30;
+        document.getElementById('failedServers').textContent = '-';
+        document.getElementById('criticalServers').textContent = '-';
     }
 
     infraTabs[currentGroup].renderer(infraData);
@@ -749,6 +755,159 @@ function renderMQQueues(data) {
             </div>
         </div>
     `;
+}
+
+// --- PRZEŁĄCZENIA RÓL KLASTRÓW ---
+function renderRoleSwitches(data) {
+    const searchBar = document.getElementById('tabSearchBar');
+    searchBar.innerHTML = '<input type="text" class="tab-search-input" placeholder="Szukaj w przełączeniach..." onkeyup="filterRoleSwitches()">';
+
+    const grid = document.getElementById('serverGrid');
+    const switches = data.Switches || [];
+
+    if (switches.length === 0) {
+        grid.innerHTML = '<div class="loading">Brak zdarzeń przełączeń ról w ostatnich ' + (data.DaysBack || 30) + ' dniach</div>';
+        return;
+    }
+
+    // Sortowanie i filtrowanie
+    let sortColumn = 'TimeCreated';
+    let sortDirection = 'desc';
+
+    grid.innerHTML = `
+        <div class="role-switches-container" data-server="RoleSwitches-All">
+            <div class="mq-header">
+                <span>Historia przełączeń ról klastrów</span>
+                <span class="mq-count">${switches.length} zdarzeń (ostatnie ${data.DaysBack || 30} dni)</span>
+            </div>
+            <div class="mq-table">
+                <table id="roleSwitchesTable">
+                    <thead>
+                        <tr>
+                            <th class="sortable" data-sort="TimeCreated" onclick="sortRoleSwitches('TimeCreated')">Data/Czas <span class="sort-indicator">▼</span></th>
+                            <th class="sortable" data-sort="ClusterName" onclick="sortRoleSwitches('ClusterName')">Klaster</th>
+                            <th class="sortable" data-sort="ClusterType" onclick="sortRoleSwitches('ClusterType')">Typ</th>
+                            <th class="sortable" data-sort="EventType" onclick="sortRoleSwitches('EventType')">Zdarzenie</th>
+                            <th class="sortable" data-sort="RoleName" onclick="sortRoleSwitches('RoleName')">Rola</th>
+                            <th class="sortable" data-sort="SourceNode" onclick="sortRoleSwitches('SourceNode')">Z węzła</th>
+                            <th class="sortable" data-sort="TargetNode" onclick="sortRoleSwitches('TargetNode')">Na węzeł</th>
+                        </tr>
+                    </thead>
+                    <tbody id="roleSwitchesBody">
+                        ${switches.map(sw => {
+                            const eventClass = getEventTypeClass(sw.EventType);
+                            return `
+                                <tr class="${eventClass}">
+                                    <td>${sw.TimeCreated || ''}</td>
+                                    <td><strong>${sw.ClusterName || ''}</strong></td>
+                                    <td><span class="cluster-type-badge">${sw.ClusterType || ''}</span></td>
+                                    <td><span class="event-type-badge ${eventClass}">${sw.EventType || ''}</span></td>
+                                    <td>${sw.RoleName || ''}</td>
+                                    <td>${sw.SourceNode || '-'}</td>
+                                    <td>${sw.TargetNode || '-'}</td>
+                                </tr>
+                            `;
+                        }).join('')}
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    `;
+
+    // Zapisz dane do późniejszego sortowania
+    window.roleSwitchesData = switches;
+    window.roleSwitchesSort = { column: 'TimeCreated', direction: 'desc' };
+}
+
+function getEventTypeClass(eventType) {
+    if (!eventType) return '';
+    const et = eventType.toLowerCase();
+    if (et.includes('failed') || et.includes('offline')) return 'event-error';
+    if (et.includes('started') || et.includes('moved')) return 'event-warning';
+    if (et.includes('completed') || et.includes('online')) return 'event-success';
+    return '';
+}
+
+function sortRoleSwitches(column) {
+    if (!window.roleSwitchesData) return;
+
+    if (window.roleSwitchesSort.column === column) {
+        window.roleSwitchesSort.direction = window.roleSwitchesSort.direction === 'asc' ? 'desc' : 'asc';
+    } else {
+        window.roleSwitchesSort.column = column;
+        window.roleSwitchesSort.direction = 'asc';
+    }
+
+    const sorted = [...window.roleSwitchesData].sort((a, b) => {
+        let valA = a[column] || '';
+        let valB = b[column] || '';
+
+        if (column === 'TimeCreated') {
+            valA = new Date(valA);
+            valB = new Date(valB);
+        } else {
+            valA = valA.toString().toLowerCase();
+            valB = valB.toString().toLowerCase();
+        }
+
+        let result = 0;
+        if (valA < valB) result = -1;
+        if (valA > valB) result = 1;
+        return window.roleSwitchesSort.direction === 'asc' ? result : -result;
+    });
+
+    const tbody = document.getElementById('roleSwitchesBody');
+    if (!tbody) return;
+
+    tbody.innerHTML = sorted.map(sw => {
+        const eventClass = getEventTypeClass(sw.EventType);
+        return `
+            <tr class="${eventClass}">
+                <td>${sw.TimeCreated || ''}</td>
+                <td><strong>${sw.ClusterName || ''}</strong></td>
+                <td><span class="cluster-type-badge">${sw.ClusterType || ''}</span></td>
+                <td><span class="event-type-badge ${eventClass}">${sw.EventType || ''}</span></td>
+                <td>${sw.RoleName || ''}</td>
+                <td>${sw.SourceNode || '-'}</td>
+                <td>${sw.TargetNode || '-'}</td>
+            </tr>
+        `;
+    }).join('');
+
+    // Aktualizuj wskaźniki sortowania
+    document.querySelectorAll('#roleSwitchesTable th.sortable').forEach(th => {
+        const indicator = th.querySelector('.sort-indicator');
+        if (indicator) {
+            if (th.dataset.sort === column) {
+                indicator.textContent = window.roleSwitchesSort.direction === 'asc' ? '▲' : '▼';
+            } else {
+                indicator.textContent = '';
+            }
+        }
+    });
+}
+
+function filterRoleSwitches() {
+    const searchInput = document.querySelector('#tabSearchBar .tab-search-input');
+    if (!searchInput) return;
+
+    const search = searchInput.value.toLowerCase().trim();
+    const rows = document.querySelectorAll('#roleSwitchesBody tr');
+
+    rows.forEach(row => {
+        const text = row.textContent.toLowerCase();
+        if (!search || text.includes(search)) {
+            row.style.display = '';
+            if (search) {
+                row.classList.add('highlight-row');
+            } else {
+                row.classList.remove('highlight-row');
+            }
+        } else {
+            row.style.display = 'none';
+            row.classList.remove('highlight-row');
+        }
+    });
 }
 
 // =============================================================================
