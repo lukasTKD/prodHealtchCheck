@@ -2,6 +2,7 @@
 # =============================================================================
 # GetLogs.ps1
 # Pobiera logi Windows Event Log z serwera i zapisuje do pliku
+# Używa Invoke-Command (WinRM) zamiast Get-WinEvent -ComputerName (RPC)
 # =============================================================================
 
 param(
@@ -14,7 +15,7 @@ param(
     [Parameter(Mandatory=$true)]
     [int]$MinutesBack,
 
-    [string]$OutputPath = ""
+    [int]$MaxEvents = 1000
 )
 
 $ScriptPath = $PSScriptRoot
@@ -35,38 +36,48 @@ if (-not (Test-Path $EventLogsPath)) {
 
 $startTime = (Get-Date).AddMinutes(-$MinutesBack)
 
-try {
-    $events = Get-WinEvent -ComputerName $ServerName -FilterHashtable @{
-        LogName = $LogName
-        StartTime = $startTime
-    } -ErrorAction Stop | Select-Object @{
-        Name='TimeCreated'
-        Expression={$_.TimeCreated.ToString("yyyy-MM-ddTHH:mm:ss")}
-    }, @{
-        Name='LevelDisplayName'
-        Expression={$_.LevelDisplayName}
-    }, @{
-        Name='Id'
-        Expression={$_.Id}
-    }, @{
-        Name='ProviderName'
-        Expression={$_.ProviderName}
-    }, @{
-        Name='Message'
-        Expression={
-            # Escape problematycznych znaków dla JSON
-            $msg = $_.Message
-            if ($msg) {
-                $msg = $msg -replace '[\x00-\x1f]', ' '  # Usuń znaki kontrolne
-                $msg = $msg -replace '\\', '\\\\'        # Escape backslash
-                $msg = $msg.Trim()
+# ScriptBlock wykonywany zdalnie przez Invoke-Command
+$scriptBlock = {
+    param($logName, $startTime, $maxEvents)
+
+    try {
+        $events = Get-WinEvent -FilterHashtable @{
+            LogName   = $logName
+            StartTime = $startTime
+        } -MaxEvents $maxEvents -ErrorAction Stop
+
+        @($events | ForEach-Object {
+            @{
+                TimeCreated    = $_.TimeCreated.ToString("yyyy-MM-ddTHH:mm:ss")
+                LevelDisplayName = $_.LevelDisplayName
+                Id             = $_.Id
+                ProviderName   = $_.ProviderName
+                Message        = ($_.Message -replace '[\x00-\x1f]', ' ').Trim()
             }
-            $msg
+        })
+    } catch {
+        if ($_.Exception.Message -like "*No events were found*") {
+            @()
+        } else {
+            throw $_
         }
     }
+}
 
-    if ($events) {
+try {
+    # Użyj Invoke-Command (WinRM) zamiast Get-WinEvent -ComputerName (RPC)
+    $events = Invoke-Command -ComputerName $ServerName -ScriptBlock $scriptBlock `
+        -ArgumentList $LogName, $startTime, $MaxEvents `
+        -ErrorAction Stop
+
+    if ($events -and $events.Count -gt 0) {
+        # Konwertuj do JSON
         $jsonOutput = $events | ConvertTo-Json -Depth 3 -Compress
+
+        # Dla pojedynczego eventu ConvertTo-Json nie zwraca tablicy
+        if ($events.Count -eq 1) {
+            $jsonOutput = "[$jsonOutput]"
+        }
 
         # Zapisz do pliku w EventLogs
         $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
@@ -82,10 +93,15 @@ try {
     } else {
         "[]"
     }
-} catch [System.Exception] {
-    if ($_.Exception.Message -like "*No events were found*") {
-        "[]"
-    } else {
-        throw $_
-    }
+} catch {
+    # Zwróć błąd jako JSON
+    $errorJson = @{
+        Error = $true
+        Message = $_.Exception.Message
+        Server = $ServerName
+        LogName = $LogName
+    } | ConvertTo-Json -Compress
+
+    Write-Error $errorJson
+    exit 1
 }
