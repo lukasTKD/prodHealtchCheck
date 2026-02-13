@@ -31,7 +31,7 @@
       "sources": {
         "fileShares": "fileshare.csv",
         "sqlInstances": "sql_db_details.csv",
-        "mqConfig": "config_mq.json"
+        "mqConfig": "mq_servers.json"
       },
       "destinations": {
         "fileShares": "infra_UdzialySieciowe.json",

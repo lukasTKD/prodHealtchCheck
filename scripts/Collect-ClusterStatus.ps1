@@ -1,14 +1,15 @@
 #Requires -Version 5.1
 # =============================================================================
 # Collect-ClusterStatus.ps1
-# Zbiera status klastrów Windows i zapisuje do JSON
+# Zbiera status klastrow Windows i zapisuje do JSON
 # Uruchamiany co 5 minut (razem z Collect-AllGroups.ps1)
+# Logika oparta na dzialajacych skryptach z old_working_ps
 # =============================================================================
 
 $ScriptPath = $PSScriptRoot
 $ConfigFile = Join-Path (Split-Path $ScriptPath -Parent) "app-config.json"
 
-# Wczytaj konfigurację
+# Wczytaj konfiguracje
 if (Test-Path $ConfigFile) {
     $appConfig = Get-Content $ConfigFile -Raw | ConvertFrom-Json
     $BasePath = $appConfig.paths.basePath
@@ -22,7 +23,7 @@ if (Test-Path $ConfigFile) {
     $ConfigPath = "$BasePath\config"
 }
 
-# Upewnij się że katalogi istnieją
+# Upewnij sie ze katalogi istnieja
 @($DataPath, $LogsPath) | ForEach-Object {
     if (-not (Test-Path $_)) {
         New-Item -ItemType Directory -Path $_ -Force | Out-Null
@@ -48,8 +49,86 @@ function Write-Log {
     "$timestamp [CLUSTERS] $Message" | Out-File $LogPath -Append -Encoding UTF8
 }
 
-# --- Wczytaj konfigurację klastrów ---
-# Sprawdź kilka możliwych lokalizacji pliku clusters.json
+# --- Funkcja pobierajaca status wezlow klastra (z Untitled6.ps1) ---
+function Get-ClusterNodeStatus {
+    param([string]$ClusterName)
+
+    try {
+        $result = Invoke-Command -ComputerName $ClusterName -ErrorAction Stop -ScriptBlock {
+            Get-ClusterNode | ForEach-Object {
+                $node = $_
+                $nodeNetworks = Get-ClusterNetworkInterface -Node $node.Name -ErrorAction SilentlyContinue
+                $ipAddresses = ($nodeNetworks | ForEach-Object { $_.Address }) -join ", "
+
+                [PSCustomObject]@{
+                    Name          = $node.Name
+                    State         = $node.State.ToString()
+                    NodeWeight    = $node.NodeWeight
+                    DynamicWeight = $node.DynamicWeight
+                    IPAddresses   = if ($ipAddresses) { $ipAddresses } else { "N/A" }
+                }
+            }
+        }
+        return $result
+    }
+    catch {
+        Write-Log "BLAD Get-ClusterNodeStatus dla $ClusterName : $($_.Exception.Message)"
+        return $null
+    }
+}
+
+# --- Funkcja pobierajaca role klastra (z Untitled6.ps1) ---
+function Get-ClusterRoleStatus {
+    param([string]$ClusterName)
+
+    try {
+        $result = Invoke-Command -ComputerName $ClusterName -ErrorAction Stop -ScriptBlock {
+            Get-ClusterGroup | ForEach-Object {
+                $role = $_
+                try {
+                    $resources = Get-ClusterResource | Where-Object { $_.OwnerGroup -eq $role.Name }
+                    $ipAddresses = ($resources | Where-Object { $_.ResourceType -eq "IP Address" } | ForEach-Object {
+                        try {
+                            $params = Get-ClusterParameter -InputObject $_ -Name Address -ErrorAction SilentlyContinue
+                            $params.Value
+                        } catch { "N/A" }
+                    }) -join ", "
+                } catch {
+                    $ipAddresses = "N/A"
+                }
+
+                [PSCustomObject]@{
+                    Name        = $role.Name
+                    State       = $role.State.ToString()
+                    OwnerNode   = $role.OwnerNode.ToString()
+                    IPAddresses = if ($ipAddresses) { $ipAddresses } else { "" }
+                }
+            }
+        }
+        return $result
+    }
+    catch {
+        Write-Log "BLAD Get-ClusterRoleStatus dla $ClusterName : $($_.Exception.Message)"
+        return $null
+    }
+}
+
+# --- Funkcja pobierajaca nazwe klastra ---
+function Get-ClusterDisplayName {
+    param([string]$ClusterName)
+
+    try {
+        $result = Invoke-Command -ComputerName $ClusterName -ErrorAction Stop -ScriptBlock {
+            (Get-Cluster).Name
+        }
+        return $result
+    }
+    catch {
+        return $ClusterName
+    }
+}
+
+# --- Wczytaj konfiguracje klastrow ---
 $possiblePaths = @(
     "$ConfigPath\clusters.json",
     "$BasePath\clusters.json",
@@ -69,6 +148,15 @@ if (-not $ClustersConfigPath) {
     foreach ($path in $possiblePaths) {
         Write-Log "  - $path"
     }
+    @{
+        LastUpdate         = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
+        CollectionDuration = 0
+        TotalClusters      = 0
+        OnlineCount        = 0
+        FailedCount        = 0
+        Clusters           = @()
+        Error              = "Brak pliku konfiguracji clusters.json"
+    } | ConvertTo-Json -Depth 10 | Out-File $OutputPath -Encoding UTF8 -Force
     exit 1
 }
 
@@ -82,141 +170,97 @@ try {
     exit 1
 }
 
-# Walidacja struktury konfiguracji - plik uzywa "clusterNames" (plaska tablica nazw klastrow)
-$clusterNames = @($config.clusterNames)
-Write-Log "Wczytano konfiguracje: $($clusterNames.Count) klastrow"
-Write-Log "DEBUG: Dostepne property w config: $( ($config | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name) -join ', ' )"
+# Obsluga obu formatow konfiguracji: clusterNames (plaska tablica) lub clusters (tablica obiektow)
+$clusterList = @()
+if ($config.clusterNames) {
+    # Format: { "clusterNames": ["srv1", "srv2"] }
+    $clusterList = @($config.clusterNames)
+    Write-Log "Uzyto formatu clusterNames: $($clusterList.Count) klastrow"
+} elseif ($config.clusters) {
+    # Format: { "clusters": [{ "cluster_type": "SQL", "servers": ["srv1", "srv2"] }] }
+    foreach ($cluster in $config.clusters) {
+        if ($cluster.servers) {
+            $clusterList += @($cluster.servers)
+        }
+    }
+    $clusterList = @($clusterList | Select-Object -Unique)
+    Write-Log "Uzyto formatu clusters: $($clusterList.Count) klastrow"
+}
 
-if ($clusterNames.Count -eq 0) {
-    Write-Log "BLAD: Brak klastrow w konfiguracji (property 'clusterNames' pusta lub nie istnieje)"
+if ($clusterList.Count -eq 0) {
+    Write-Log "BLAD: Brak klastrow w konfiguracji"
     exit 1
 }
-
-# Zbierz liste klastrow
-$clusterList = [System.Collections.ArrayList]::new()
-foreach ($name in $clusterNames) {
-    Write-Log "  Klaster: $name"
-    [void]$clusterList.Add(@{ FQDN = $name; Type = 'Windows' })
-}
-
-Write-Log "Laczna liczba klastrow do odpytania: $($clusterList.Count)"
 
 Write-Log "START zbierania statusu klastrow ($($clusterList.Count) klastrow)"
 $startTime = Get-Date
 $clusterResults = [System.Collections.ArrayList]::new()
 
-# --- Upewnij się że moduł FailoverClusters jest dostępny ---
-try {
-    Import-Module FailoverClusters -ErrorAction Stop
-    Write-Log "Modul FailoverClusters zaladowany"
-} catch {
-    Write-Log "BLAD KRYTYCZNY: Nie mozna zaladowac modulu FailoverClusters - $($_.Exception.Message)"
-    Write-Log "Zainstaluj feature: Install-WindowsFeature RSAT-Clustering-PowerShell"
-    # Zapisz pusty wynik
-    @{
-        LastUpdate         = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-        CollectionDuration = 0
-        TotalClusters      = 0
-        OnlineCount        = 0
-        FailedCount        = 0
-        Clusters           = @()
-        Error              = "Modul FailoverClusters niedostepny"
-    } | ConvertTo-Json -Depth 10 | Out-File $OutputPath -Encoding UTF8 -Force
-    exit 1
-}
-
-# --- Zbieranie danych z klastrów (sekwencyjnie - niezawodne) ---
-Write-Log "Rozpoczynam odpytywanie $($clusterList.Count) klastrow..."
-
-foreach ($cluster in $clusterList) {
-    $clusterFQDN = $cluster.FQDN
-    $clusterType = $cluster.Type
-    Write-Log "Odpytuje klaster: $clusterFQDN (typ: $clusterType)"
+# --- Zbieranie danych z klastrow ---
+foreach ($clusterServer in $clusterList) {
+    Write-Log "Odpytuje klaster: $clusterServer"
 
     try {
-        # Pobierz nazwę klastra
-        $clusterObj = Get-Cluster -Name $clusterFQDN -ErrorAction Stop
-        $clusterName = $clusterObj.Name
+        # Pobierz nazwe klastra
+        $clusterDisplayName = Get-ClusterDisplayName -ClusterName $clusterServer
 
-        # Pobierz węzły - jedno zapytanie
-        $rawNodes = @(Get-ClusterNode -Cluster $clusterFQDN -ErrorAction Stop)
+        # Pobierz wezly
+        $nodes = @(Get-ClusterNodeStatus -ClusterName $clusterServer)
 
-        # Pobierz interfejsy sieciowe - jedno zapytanie dla wszystkich węzłów
-        $allInterfaces = @()
-        try {
-            $allInterfaces = @(Get-ClusterNetworkInterface -Cluster $clusterFQDN -ErrorAction SilentlyContinue)
-        } catch {}
+        # Pobierz role
+        $roles = @(Get-ClusterRoleStatus -ClusterName $clusterServer)
 
-        # Buduj listę węzłów z adresami IP (lokalne przetwarzanie bez RPC)
-        $nodes = @($rawNodes | ForEach-Object {
-            $nodeName = $_.Name
-            $nodeIPs = ($allInterfaces | Where-Object { $_.Node -eq $nodeName } |
-                        ForEach-Object { $_.Address }) -join ", "
-            @{
-                Name        = $nodeName
-                State       = $_.State.ToString()
-                NodeWeight  = $_.NodeWeight
-                DynamicWeight = $_.DynamicWeight
-                IPAddresses = $(if ($nodeIPs) { $nodeIPs } else { "N/A" })
-            }
-        })
-
-        # Pobierz role i zasoby - dwa zapytania zamiast N
-        $rawRoles = @(Get-ClusterGroup -Cluster $clusterFQDN -ErrorAction Stop)
-        $allResources = @()
-        try {
-            $allResources = @(Get-ClusterResource -Cluster $clusterFQDN -ErrorAction SilentlyContinue)
-        } catch {}
-
-        # Batch pobieranie parametrów IP - filtruj tylko IP Address resources
-        $ipResources = @($allResources | Where-Object { $_.ResourceType -eq "IP Address" })
-        $ipParams = @{}
-
-        $ipResources | ForEach-Object {
-            try {
-                $addr = (Get-ClusterParameter -InputObject $_ -Name Address -ErrorAction SilentlyContinue).Value
-                if ($addr) {
-                    $ownerGroup = $_.OwnerGroup.ToString()
-                    if ($ipParams.ContainsKey($ownerGroup)) {
-                        $ipParams[$ownerGroup] += ", $addr"
-                    } else {
-                        $ipParams[$ownerGroup] = $addr
-                    }
-                }
-            } catch {}
+        if ($null -eq $nodes -or $nodes.Count -eq 0) {
+            throw "Nie udalo sie pobrac wezlow klastra"
         }
 
-        $roles = @($rawRoles | ForEach-Object {
-            $roleName = $_.Name
-            @{
-                Name        = $roleName
-                State       = $_.State.ToString()
-                OwnerNode   = $_.OwnerNode.ToString()
-                IPAddresses = $(if ($ipParams.ContainsKey($roleName)) { $ipParams[$roleName] } else { "" })
-            }
-        })
+        # Okresl typ klastra na podstawie rol
+        $clusterType = "Windows"
+        if ($roles | Where-Object { $_.Name -like "*SQL*" }) {
+            $clusterType = "SQL"
+        } elseif ($roles | Where-Object { $_.Name -like "*File*" -or $_.Name -like "*Share*" }) {
+            $clusterType = "FileShare"
+        } elseif ($roles | Where-Object { $_.Name -like "*QM*" -or $_.Name -like "*MQ*" }) {
+            $clusterType = "MQ"
+        }
 
         $result = @{
             Success     = $true
-            ClusterName = $clusterName
-            FQDN        = $clusterFQDN
+            ClusterName = $clusterDisplayName
+            FQDN        = $clusterServer
             ClusterType = $clusterType
             Status      = "Online"
-            Nodes       = $nodes
-            Roles       = $roles
+            Nodes       = @($nodes | ForEach-Object {
+                @{
+                    Name          = $_.Name
+                    State         = $_.State
+                    NodeWeight    = $_.NodeWeight
+                    DynamicWeight = $_.DynamicWeight
+                    IPAddresses   = $_.IPAddresses
+                }
+            })
+            Roles       = @($roles | ForEach-Object {
+                @{
+                    Name        = $_.Name
+                    State       = $_.State
+                    OwnerNode   = $_.OwnerNode
+                    IPAddresses = $_.IPAddresses
+                }
+            })
             Error       = $null
         }
-        Write-Log "OK: $clusterName ($clusterType) - $($nodes.Count) wezlow, $($roles.Count) rol"
+
+        Write-Log "OK: $clusterDisplayName ($clusterType) - $($nodes.Count) wezlow, $($roles.Count) rol"
         [void]$clusterResults.Add($result)
     }
     catch {
         $errMsg = $_.Exception.Message
-        Write-Log "FAIL: $clusterFQDN - $errMsg"
+        Write-Log "FAIL: $clusterServer - $errMsg"
         [void]$clusterResults.Add(@{
             Success     = $false
-            ClusterName = $clusterFQDN -replace '\..*$', ''
-            FQDN        = $clusterFQDN
-            ClusterType = $clusterType
+            ClusterName = $clusterServer
+            FQDN        = $clusterServer
+            ClusterType = "Unknown"
             Status      = "Error"
             Nodes       = @()
             Roles       = @()

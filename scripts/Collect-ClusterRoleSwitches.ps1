@@ -85,30 +85,50 @@ try {
     exit 1
 }
 
-# Plik uzywa "clusterNames" (plaska tablica nazw klastrow)
-$clusterNames = @($config.clusterNames)
-Write-Log "Wczytano konfiguracje: $($clusterNames.Count) klastrow"
+# Obsluga obu formatow konfiguracji: clusterNames (plaska tablica) lub clusters (tablica obiektow)
+$clusterNames = @()
+if ($config.clusterNames) {
+    # Format: { "clusterNames": ["srv1", "srv2"] }
+    $clusterNames = @($config.clusterNames)
+    Write-Log "Uzyto formatu clusterNames: $($clusterNames.Count) klastrow"
+} elseif ($config.clusters) {
+    # Format: { "clusters": [{ "cluster_type": "SQL", "servers": ["srv1", "srv2"] }] }
+    foreach ($cluster in $config.clusters) {
+        if ($cluster.servers) {
+            $clusterNames += @($cluster.servers)
+        }
+    }
+    $clusterNames = @($clusterNames | Select-Object -Unique)
+    Write-Log "Uzyto formatu clusters: $($clusterNames.Count) klastrow"
+}
 
 if ($clusterNames.Count -eq 0) {
-    Write-Log "BLAD: Brak klastrow w konfiguracji (property 'clusterNames' pusta lub nie istnieje)"
-    Write-Log "DEBUG: Dostepne property w config: $( ($config | Get-Member -MemberType NoteProperty | Select-Object -ExpandProperty Name) -join ', ' )"
+    Write-Log "BLAD: Brak klastrow w konfiguracji"
     exit 1
 }
 
-# Zbierz wszystkie węzły klastrów
+# Zbierz wszystkie wezly klastrow (przez Invoke-Command dla niezawodnosci)
 $clusterNodes = [System.Collections.ArrayList]::new()
 foreach ($clusterName in $clusterNames) {
     Write-Log "Pobieranie wezlow klastra: $clusterName"
     try {
-        $nodes = @(Get-ClusterNode -Cluster $clusterName -ErrorAction Stop | Select-Object -ExpandProperty Name)
-        foreach ($node in $nodes) {
+        $result = Invoke-Command -ComputerName $clusterName -ErrorAction Stop -ScriptBlock {
+            $clusterObj = Get-Cluster
+            $nodes = Get-ClusterNode | Select-Object -ExpandProperty Name
+            @{
+                ClusterDisplayName = $clusterObj.Name
+                Nodes = $nodes
+            }
+        }
+        foreach ($node in $result.Nodes) {
             [void]$clusterNodes.Add(@{
                 ClusterFQDN = $clusterName
+                ClusterDisplayName = $result.ClusterDisplayName
                 ClusterType = 'Windows'
                 NodeName    = $node
             })
         }
-        Write-Log "  OK: $clusterName - $($nodes.Count) wezlow"
+        Write-Log "  OK: $($result.ClusterDisplayName) - $($result.Nodes.Count) wezlow"
     } catch {
         Write-Log "WARN: Nie mozna pobrac wezlow klastra $clusterName - $($_.Exception.Message)"
     }
@@ -217,14 +237,14 @@ if ($uniqueNodes.Count -gt 0) {
 
     foreach ($result in $rawResults) {
         if ($result -is [hashtable] -or $result -is [System.Collections.Specialized.OrderedDictionary]) {
-            # Znajdź informacje o klastrze dla tego węzła
+            # Znajdz informacje o klastrze dla tego wezla
             $nodeInfo = $clusterNodes | Where-Object { $_.NodeName -eq $result.ServerName } | Select-Object -First 1
 
             [void]$allSwitches.Add(@{
                 TimeCreated = $result.TimeCreated
                 EventId     = $result.EventId
                 EventType   = $result.EventType
-                ClusterName = $(if ($nodeInfo) { $nodeInfo.ClusterFQDN -replace '\..*$', '' } else { "Unknown" })
+                ClusterName = $(if ($nodeInfo -and $nodeInfo.ClusterDisplayName) { $nodeInfo.ClusterDisplayName } elseif ($nodeInfo) { $nodeInfo.ClusterFQDN -replace '\..*$', '' } else { "Unknown" })
                 ClusterType = $(if ($nodeInfo) { $nodeInfo.ClusterType } else { "Unknown" })
                 RoleName    = $result.RoleName
                 SourceNode  = $result.SourceNode
@@ -241,7 +261,7 @@ if ($uniqueNodes.Count -gt 0) {
                         TimeCreated = $r.TimeCreated
                         EventId     = $r.EventId
                         EventType   = $r.EventType
-                        ClusterName = $(if ($nodeInfo) { $nodeInfo.ClusterFQDN -replace '\..*$', '' } else { "Unknown" })
+                        ClusterName = $(if ($nodeInfo -and $nodeInfo.ClusterDisplayName) { $nodeInfo.ClusterDisplayName } elseif ($nodeInfo) { $nodeInfo.ClusterFQDN -replace '\..*$', '' } else { "Unknown" })
                         ClusterType = $(if ($nodeInfo) { $nodeInfo.ClusterType } else { "Unknown" })
                         RoleName    = $r.RoleName
                         SourceNode  = $r.SourceNode
