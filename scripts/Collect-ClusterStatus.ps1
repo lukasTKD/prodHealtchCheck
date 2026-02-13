@@ -1,8 +1,8 @@
 #Requires -Version 5.1
 # =============================================================================
 # Collect-ClusterStatus.ps1
-# Zbiera status klastrow Windows (wezly + role) - zapis do JSON
-# Bazuje na dzialajacym kodzie z old_working_ps/Untitled6.ps1
+# Zbiera status klastrow Windows - SZYBKA WERSJA
+# Invoke-Command z lista serwerow = natywna rownoleglość
 # =============================================================================
 
 $ScriptPath = $PSScriptRoot
@@ -29,56 +29,7 @@ function Write-Log {
     "$timestamp [CLUSTERS] $Message" | Out-File $LogPath -Append -Encoding UTF8
 }
 
-# --- Funkcje z Untitled6.ps1 ---
-function ClusterNodeStatus($cluster) {
-    Invoke-Command -ComputerName $cluster -ScriptBlock {
-        Get-ClusterNode | ForEach-Object {
-            $node = $_
-            $nodeNetworks = Get-ClusterNetworkInterface -Node $node.Name -ErrorAction SilentlyContinue
-            $ipAddresses = ($nodeNetworks | ForEach-Object { $_.Address }) -join ", "
-            [PSCustomObject]@{
-                Name          = $node.Name
-                State         = $node.State.ToString()
-                NodeWeight    = $node.NodeWeight
-                DynamicWeight = $node.DynamicWeight
-                IPAddresses   = if ($ipAddresses) { $ipAddresses } else { "N/A" }
-            }
-        }
-    }
-}
-
-function ClusterGroupStatus($cluster) {
-    Invoke-Command -ComputerName $cluster -ScriptBlock {
-        Get-ClusterGroup | ForEach-Object {
-            $role = $_
-            try {
-                $resources = Get-ClusterResource | Where-Object { $_.OwnerGroup -eq $role.Name }
-                $ipAddresses = ($resources | Where-Object { $_.ResourceType -eq "IP Address" } | ForEach-Object {
-                    try {
-                        $params = Get-ClusterParameter -InputObject $_ -Name Address
-                        $params.Value
-                    } catch { "N/A" }
-                }) -join ", "
-            } catch {
-                $ipAddresses = "N/A"
-            }
-            [PSCustomObject]@{
-                Name        = $role.Name
-                State       = $role.State.ToString()
-                OwnerNode   = $role.OwnerNode.ToString()
-                IPAddresses = if ($ipAddresses) { $ipAddresses } else { "" }
-            }
-        }
-    }
-}
-
-function GetClusterName($cluster) {
-    Invoke-Command -ComputerName $cluster -ScriptBlock {
-        (Get-Cluster).Name
-    }
-}
-
-# --- Wczytaj konfiguracje ---
+# Wczytaj konfiguracje
 $ClustersConfigPath = "$ConfigPath\clusters.json"
 if (-not (Test-Path $ClustersConfigPath)) {
     $ClustersConfigPath = "D:\PROD_REPO_DATA\IIS\Cluster\clusters.json"
@@ -86,138 +37,108 @@ if (-not (Test-Path $ClustersConfigPath)) {
 
 if (-not (Test-Path $ClustersConfigPath)) {
     Write-Log "BLAD: Brak pliku clusters.json"
-    @{
-        LastUpdate = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
-        TotalClusters = 0
-        Clusters = @()
-        Error = "Brak pliku konfiguracji"
-    } | ConvertTo-Json -Depth 10 | Out-File $OutputPath -Encoding UTF8
+    @{ LastUpdate = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss"); TotalClusters = 0; Clusters = @() } | ConvertTo-Json -Depth 10 | Out-File $OutputPath -Encoding UTF8
     exit 1
 }
 
 $config = Get-Content $ClustersConfigPath -Raw | ConvertFrom-Json
 
-# Wyciagnij wszystkie serwery z konfiguracji
-$clusterList = @()
+# Zbuduj liste serwerow z typami
+$clusterMap = @{}
 foreach ($c in $config.clusters) {
     foreach ($srv in $c.servers) {
-        $clusterList += @{ Server = $srv; Type = $c.cluster_type }
+        $clusterMap[$srv] = $c.cluster_type
     }
 }
+$serverList = @($clusterMap.Keys)
 
-Write-Log "START: $($clusterList.Count) klastrow"
+Write-Log "START: $($serverList.Count) klastrow"
 $startTime = Get-Date
-$results = [System.Collections.ArrayList]::new()
 
-# --- Rownolegle odpytywanie klastrow ---
-$jobs = @()
-foreach ($item in $clusterList) {
-    $jobs += Start-Job -ScriptBlock {
-        param($srv, $type)
+# JEDNO Invoke-Command na wszystkie serwery - natywna rownoleglość
+$rawResults = Invoke-Command -ComputerName $serverList -ErrorAction SilentlyContinue -ScriptBlock {
+    $clusterName = (Get-Cluster -ErrorAction SilentlyContinue).Name
+    if (-not $clusterName) { $clusterName = $env:COMPUTERNAME }
 
-        function ClusterNodeStatus($cluster) {
-            Invoke-Command -ComputerName $cluster -ScriptBlock {
-                Get-ClusterNode | ForEach-Object {
-                    $node = $_
-                    $nodeNetworks = Get-ClusterNetworkInterface -Node $node.Name -ErrorAction SilentlyContinue
-                    $ipAddresses = ($nodeNetworks | ForEach-Object { $_.Address }) -join ", "
-                    [PSCustomObject]@{
-                        Name          = $node.Name
-                        State         = $node.State.ToString()
-                        NodeWeight    = $node.NodeWeight
-                        DynamicWeight = $node.DynamicWeight
-                        IPAddresses   = if ($ipAddresses) { $ipAddresses } else { "N/A" }
-                    }
-                }
-            }
+    $nodes = @(Get-ClusterNode -ErrorAction SilentlyContinue | ForEach-Object {
+        $n = $_
+        $ips = (Get-ClusterNetworkInterface -Node $n.Name -ErrorAction SilentlyContinue | ForEach-Object { $_.Address }) -join ", "
+        @{
+            Name          = $n.Name
+            State         = $n.State.ToString()
+            NodeWeight    = $n.NodeWeight
+            DynamicWeight = $n.DynamicWeight
+            IPAddresses   = if ($ips) { $ips } else { "N/A" }
         }
+    })
 
-        function ClusterGroupStatus($cluster) {
-            Invoke-Command -ComputerName $cluster -ScriptBlock {
-                Get-ClusterGroup | ForEach-Object {
-                    $role = $_
-                    try {
-                        $resources = Get-ClusterResource | Where-Object { $_.OwnerGroup -eq $role.Name }
-                        $ipAddresses = ($resources | Where-Object { $_.ResourceType -eq "IP Address" } | ForEach-Object {
-                            try {
-                                $params = Get-ClusterParameter -InputObject $_ -Name Address
-                                $params.Value
-                            } catch { "N/A" }
-                        }) -join ", "
-                    } catch {
-                        $ipAddresses = "N/A"
-                    }
-                    [PSCustomObject]@{
-                        Name        = $role.Name
-                        State       = $role.State.ToString()
-                        OwnerNode   = $role.OwnerNode.ToString()
-                        IPAddresses = if ($ipAddresses) { $ipAddresses } else { "" }
-                    }
-                }
-            }
+    $roles = @(Get-ClusterGroup -ErrorAction SilentlyContinue | ForEach-Object {
+        $r = $_
+        $resources = Get-ClusterResource -ErrorAction SilentlyContinue | Where-Object { $_.OwnerGroup -eq $r.Name }
+        $ips = ($resources | Where-Object { $_.ResourceType -eq "IP Address" } | ForEach-Object {
+            try { (Get-ClusterParameter -InputObject $_ -Name Address -ErrorAction SilentlyContinue).Value } catch { }
+        }) -join ", "
+        @{
+            Name        = $r.Name
+            State       = $r.State.ToString()
+            OwnerNode   = $r.OwnerNode.ToString()
+            IPAddresses = $ips
         }
+    })
 
-        function GetClusterName($cluster) {
-            Invoke-Command -ComputerName $cluster -ScriptBlock {
-                (Get-Cluster).Name
-            }
-        }
-
-        try {
-            $clusterName = GetClusterName -cluster $srv
-            $nodes = @(ClusterNodeStatus -cluster $srv)
-            $roles = @(ClusterGroupStatus -cluster $srv)
-
-            @{
-                Success     = $true
-                ClusterName = $clusterName
-                FQDN        = $srv
-                ClusterType = $type
-                Status      = "Online"
-                Nodes       = $nodes
-                Roles       = $roles
-                Error       = $null
-            }
-        } catch {
-            @{
-                Success     = $false
-                ClusterName = $srv
-                FQDN        = $srv
-                ClusterType = $type
-                Status      = "Error"
-                Nodes       = @()
-                Roles       = @()
-                Error       = $_.Exception.Message
-            }
-        }
-    } -ArgumentList $item.Server, $item.Type
+    @{
+        ClusterName = $clusterName
+        Nodes       = $nodes
+        Roles       = $roles
+    }
 }
 
-# Czekaj na wszystkie joby (max 30 sekund)
-$jobs | Wait-Job -Timeout 30 | Out-Null
+# Przetwórz wyniki
+$results = [System.Collections.ArrayList]::new()
+foreach ($r in $rawResults) {
+    $srv = $r.PSComputerName
+    $type = $clusterMap[$srv]
+    [void]$results.Add(@{
+        Success     = $true
+        ClusterName = $r.ClusterName
+        FQDN        = $srv
+        ClusterType = $type
+        Status      = "Online"
+        Nodes       = $r.Nodes
+        Roles       = $r.Roles
+        Error       = $null
+    })
+    Write-Log "OK: $($r.ClusterName) ($type)"
+}
 
-foreach ($job in $jobs) {
-    if ($job.State -eq 'Completed') {
-        $result = Receive-Job -Job $job
-        [void]$results.Add($result)
-        Write-Log "OK: $($result.ClusterName) ($($result.ClusterType))"
-    } else {
-        Write-Log "TIMEOUT: job $($job.Id)"
+# Serwery ktore nie odpowiedzialy
+$okServers = @($rawResults | ForEach-Object { $_.PSComputerName })
+foreach ($srv in $serverList) {
+    if ($srv -notin $okServers) {
+        [void]$results.Add(@{
+            Success     = $false
+            ClusterName = $srv
+            FQDN        = $srv
+            ClusterType = $clusterMap[$srv]
+            Status      = "Error"
+            Nodes       = @()
+            Roles       = @()
+            Error       = "Timeout/Niedostepny"
+        })
+        Write-Log "FAIL: $srv"
     }
-    Remove-Job -Job $job -Force
 }
 
 $duration = [math]::Round(((Get-Date) - $startTime).TotalSeconds, 1)
 $onlineCount = @($results | Where-Object { $_.Status -eq "Online" }).Count
 
-$output = @{
+@{
     LastUpdate         = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
     CollectionDuration = $duration
     TotalClusters      = $results.Count
     OnlineCount        = $onlineCount
     FailedCount        = $results.Count - $onlineCount
     Clusters           = @($results)
-}
+} | ConvertTo-Json -Depth 10 | Out-File $OutputPath -Encoding UTF8 -Force
 
-$output | ConvertTo-Json -Depth 10 | Out-File $OutputPath -Encoding UTF8 -Force
 Write-Log "KONIEC: ${duration}s (OK: $onlineCount, FAIL: $($results.Count - $onlineCount))"

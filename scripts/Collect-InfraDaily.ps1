@@ -1,8 +1,8 @@
 #Requires -Version 5.1
 # =============================================================================
 # Collect-InfraDaily.ps1
-# Zbiera: udzialy sieciowe (FileShare), instancje SQL, kolejki MQ
-# Pobiera dane bezposrednio z klastrow - zapis do JSON
+# Zbiera: udzialy sieciowe, instancje SQL, kolejki MQ - SZYBKA WERSJA
+# Jedno Invoke-Command na liste serwerow = natywna rownoleglość
 # =============================================================================
 
 $ScriptPath = $PSScriptRoot
@@ -31,61 +31,48 @@ function Write-Log {
 Write-Log "=== START Collect-InfraDaily ==="
 $globalStart = Get-Date
 
-# Wczytaj konfiguracje klastrow
+# Wczytaj konfiguracje
 $ClustersConfigPath = "$ConfigPath\clusters.json"
-if (-not (Test-Path $ClustersConfigPath)) {
-    $ClustersConfigPath = "D:\PROD_REPO_DATA\IIS\Cluster\clusters.json"
-}
+if (-not (Test-Path $ClustersConfigPath)) { $ClustersConfigPath = "D:\PROD_REPO_DATA\IIS\Cluster\clusters.json" }
+$clustersConfig = if (Test-Path $ClustersConfigPath) { Get-Content $ClustersConfigPath -Raw | ConvertFrom-Json } else { $null }
 
-$clustersConfig = $null
-if (Test-Path $ClustersConfigPath) {
-    $clustersConfig = Get-Content $ClustersConfigPath -Raw | ConvertFrom-Json
-}
-
-# Wczytaj konfiguracje MQ
 $MQConfigPath = "$ConfigPath\mq_servers.json"
-$mqConfig = $null
-if (Test-Path $MQConfigPath) {
-    $mqConfig = Get-Content $MQConfigPath -Raw | ConvertFrom-Json
-}
+$mqConfig = if (Test-Path $MQConfigPath) { Get-Content $MQConfigPath -Raw | ConvertFrom-Json } else { $null }
 
 # ===================================================================
-# UDZIALY SIECIOWE (z klastrow FileShare)
+# UDZIALY SIECIOWE (FileShare) - jedno odpytanie
 # ===================================================================
 Write-Log "--- Udzialy sieciowe ---"
 $startShares = Get-Date
 $shareResults = [System.Collections.ArrayList]::new()
 
 if ($clustersConfig) {
-    $fileShareClusters = @($clustersConfig.clusters | Where-Object { $_.cluster_type -eq "FileShare" })
+    $fsServers = @($clustersConfig.clusters | Where-Object { $_.cluster_type -eq "FileShare" } | ForEach-Object { $_.servers } | ForEach-Object { $_ })
 
-    foreach ($cluster in $fileShareClusters) {
-        foreach ($srv in $cluster.servers) {
-            Write-Log "FileShare: $srv"
-            try {
-                $shares = Get-SmbShare -CimSession $srv -Special $false -ErrorAction Stop
-                $shareList = @($shares | ForEach-Object {
-                    @{
-                        ShareName  = $_.Name
-                        SharePath  = $_.Path
-                        ShareState = "Online"
-                    }
-                })
-                [void]$shareResults.Add(@{
-                    ServerName = $srv
-                    ShareCount = $shareList.Count
-                    Shares     = $shareList
-                    Error      = $null
-                })
-                Write-Log "OK FileShare: $srv ($($shareList.Count) udzialow)"
-            } catch {
-                Write-Log "FAIL FileShare: $srv - $($_.Exception.Message)"
-                [void]$shareResults.Add(@{
-                    ServerName = $srv
-                    ShareCount = 0
-                    Shares     = @()
-                    Error      = $_.Exception.Message
-                })
+    if ($fsServers.Count -gt 0) {
+        Write-Log "FileShare: $($fsServers -join ', ')"
+        $fsRaw = Invoke-Command -ComputerName $fsServers -ErrorAction SilentlyContinue -ScriptBlock {
+            $shares = @(Get-SmbShare -Special $false -ErrorAction SilentlyContinue | ForEach-Object {
+                @{ ShareName = $_.Name; SharePath = $_.Path; ShareState = "Online" }
+            })
+            @{ ServerName = $env:COMPUTERNAME; Shares = $shares }
+        }
+
+        foreach ($r in $fsRaw) {
+            [void]$shareResults.Add(@{
+                ServerName = $r.ServerName
+                ShareCount = $r.Shares.Count
+                Shares     = @($r.Shares)
+                Error      = $null
+            })
+            Write-Log "OK FileShare: $($r.ServerName) ($($r.Shares.Count))"
+        }
+
+        $okFS = @($fsRaw | ForEach-Object { $_.PSComputerName })
+        foreach ($srv in $fsServers) {
+            if ($srv -notin $okFS) {
+                [void]$shareResults.Add(@{ ServerName = $srv; ShareCount = 0; Shares = @(); Error = "Niedostepny" })
+                Write-Log "FAIL FileShare: $srv"
             }
         }
     }
@@ -98,75 +85,58 @@ $sharesDuration = [math]::Round(((Get-Date) - $startShares).TotalSeconds, 1)
     TotalServers       = $shareResults.Count
     FileServers        = @($shareResults)
 } | ConvertTo-Json -Depth 10 | Out-File "$DataPath\infra_UdzialySieciowe.json" -Encoding UTF8 -Force
-Write-Log "Udzialy zapisane (${sharesDuration}s)"
+Write-Log "Udzialy: ${sharesDuration}s"
 
 # ===================================================================
-# INSTANCJE SQL (z klastrow SQL)
+# INSTANCJE SQL - jedno odpytanie
 # ===================================================================
 Write-Log "--- Instancje SQL ---"
 $startSQL = Get-Date
 $sqlResults = [System.Collections.ArrayList]::new()
 
 if ($clustersConfig) {
-    $sqlClusters = @($clustersConfig.clusters | Where-Object { $_.cluster_type -eq "SQL" })
+    $sqlServers = @($clustersConfig.clusters | Where-Object { $_.cluster_type -eq "SQL" } | ForEach-Object { $_.servers } | ForEach-Object { $_ })
 
-    foreach ($cluster in $sqlClusters) {
-        foreach ($srv in $cluster.servers) {
-            Write-Log "SQL: $srv"
+    if ($sqlServers.Count -gt 0) {
+        Write-Log "SQL: $($sqlServers -join ', ')"
+        $sqlRaw = Invoke-Command -ComputerName $sqlServers -ErrorAction SilentlyContinue -ScriptBlock {
+            $databases = @()
+            $sqlVersion = "N/A"
+
             try {
-                $result = Invoke-Command -ComputerName $srv -ErrorAction Stop -ScriptBlock {
-                    $databases = @()
-                    $sqlVersion = "N/A"
-                    $edition = "N/A"
-
-                    # Pobierz info o bazach z Availability Groups
-                    try {
-                        $ags = Get-ClusterResource | Where-Object { $_.ResourceType -eq 'SQL Server Availability Group' }
-                        foreach ($ag in $ags) {
-                            $ownerNode = $ag.OwnerNode
-                            $agDbs = Invoke-Sqlcmd -Query "SELECT database_name FROM sys.dm_hadr_database_replica_cluster_states" -ServerInstance $ownerNode -ErrorAction SilentlyContinue
-                            foreach ($db in $agDbs) {
-                                $databases += @{
-                                    DatabaseName = $db.database_name
-                                    State        = "ONLINE"
-                                    AGName       = $ag.Name
-                                }
-                            }
-                        }
-                    } catch {}
-
-                    # Pobierz wersje SQL
-                    try {
-                        $ver = Invoke-Sqlcmd -Query "SELECT @@VERSION as Ver" -ServerInstance $env:COMPUTERNAME -ErrorAction SilentlyContinue
-                        if ($ver) { $sqlVersion = ($ver.Ver -split '\n')[0] }
-                    } catch {}
-
-                    @{
-                        Databases  = $databases
-                        SQLVersion = $sqlVersion
-                        Edition    = $edition
+                $ags = Get-ClusterResource -ErrorAction SilentlyContinue | Where-Object { $_.ResourceType -eq 'SQL Server Availability Group' }
+                foreach ($ag in $ags) {
+                    $dbs = Invoke-Sqlcmd -Query "SELECT database_name FROM sys.dm_hadr_database_replica_cluster_states" -ServerInstance $ag.OwnerNode -ErrorAction SilentlyContinue
+                    foreach ($db in $dbs) {
+                        $databases += @{ DatabaseName = $db.database_name; State = "ONLINE"; AGName = $ag.Name }
                     }
                 }
+            } catch {}
 
-                [void]$sqlResults.Add(@{
-                    ServerName    = $srv
-                    SQLVersion    = $result.SQLVersion
-                    Edition       = $result.Edition
-                    DatabaseCount = $result.Databases.Count
-                    Databases     = @($result.Databases)
-                    Error         = $null
-                })
-                Write-Log "OK SQL: $srv ($($result.Databases.Count) baz)"
-            } catch {
-                Write-Log "FAIL SQL: $srv - $($_.Exception.Message)"
-                [void]$sqlResults.Add(@{
-                    ServerName    = $srv
-                    SQLVersion    = "N/A"
-                    Edition       = "N/A"
-                    DatabaseCount = 0
-                    Databases     = @()
-                    Error         = $_.Exception.Message
-                })
+            try {
+                $ver = Invoke-Sqlcmd -Query "SELECT @@VERSION as Ver" -ServerInstance $env:COMPUTERNAME -ErrorAction SilentlyContinue
+                if ($ver) { $sqlVersion = ($ver.Ver -split '\n')[0] }
+            } catch {}
+
+            @{ ServerName = $env:COMPUTERNAME; Databases = $databases; SQLVersion = $sqlVersion }
+        }
+
+        foreach ($r in $sqlRaw) {
+            [void]$sqlResults.Add(@{
+                ServerName    = $r.ServerName
+                SQLVersion    = $r.SQLVersion
+                DatabaseCount = $r.Databases.Count
+                Databases     = @($r.Databases)
+                Error         = $null
+            })
+            Write-Log "OK SQL: $($r.ServerName) ($($r.Databases.Count) baz)"
+        }
+
+        $okSQL = @($sqlRaw | ForEach-Object { $_.PSComputerName })
+        foreach ($srv in $sqlServers) {
+            if ($srv -notin $okSQL) {
+                [void]$sqlResults.Add(@{ ServerName = $srv; SQLVersion = "N/A"; DatabaseCount = 0; Databases = @(); Error = "Niedostepny" })
+                Write-Log "FAIL SQL: $srv"
             }
         }
     }
@@ -179,111 +149,70 @@ $sqlDuration = [math]::Round(((Get-Date) - $startSQL).TotalSeconds, 1)
     TotalInstances     = $sqlResults.Count
     Instances          = @($sqlResults)
 } | ConvertTo-Json -Depth 10 | Out-File "$DataPath\infra_InstancjeSQL.json" -Encoding UTF8 -Force
-Write-Log "SQL zapisane (${sqlDuration}s)"
+Write-Log "SQL: ${sqlDuration}s"
 
 # ===================================================================
-# KOLEJKI MQ (z mq_servers.json)
+# KOLEJKI MQ - jedno odpytanie
 # ===================================================================
 Write-Log "--- Kolejki MQ ---"
 $startMQ = Get-Date
 $mqResults = [System.Collections.ArrayList]::new()
 
 if ($mqConfig) {
-    # Zbierz liste serwerow MQ
-    $mqServers = @()
+    $mqMap = @{}
     foreach ($prop in $mqConfig.PSObject.Properties) {
-        $clusterName = $prop.Name
-        foreach ($srv in $prop.Value) {
-            $mqServers += @{ Server = $srv; Cluster = $clusterName }
-        }
+        foreach ($srv in $prop.Value) { $mqMap[$srv] = $prop.Name }
     }
+    $mqServers = @($mqMap.Keys)
 
-    Write-Log "MQ: $($mqServers.Count) serwerow"
-
-    # Odpytaj rownolegle
-    $serverNames = @($mqServers | ForEach-Object { $_.Server })
-
-    $mqScriptBlock = {
-        $qmgrResults = @()
-        try {
+    if ($mqServers.Count -gt 0) {
+        Write-Log "MQ: $($mqServers -join ', ')"
+        $mqRaw = Invoke-Command -ComputerName $mqServers -ErrorAction SilentlyContinue -ScriptBlock {
+            $qmgrs = @()
             $mqData = dspmq 2>$null
             if ($mqData) {
                 foreach ($line in $mqData) {
                     if ($line -match 'QMNAME\s*\(\s*(?<name>.*?)\s*\)\s+STATUS\s*\(\s*(?<state>.*?)\s*\)') {
                         $qmName = $Matches['name'].Trim()
-                        $rawState = $Matches['state'].Trim()
-                        $cleanState = $rawState -replace 'Dzia.+?c[ye]', 'Running'
-
-                        $Port = ""
+                        $state = $Matches['state'].Trim() -replace 'Dzia.+?c[ye]', 'Running'
+                        $port = ""
                         $queues = @()
 
-                        if ($cleanState -match 'Running|Dzia') {
-                            try {
-                                $listenerData = "DISPLAY LSSTATUS(*) PORT" | runmqsc $qmName 2>$null
-                                foreach ($lLine in $listenerData) {
-                                    if ($lLine -match 'PORT\s*\(\s*(?<p>\d+)\s*\)') {
-                                        $Port = $Matches['p']
-                                        break
-                                    }
-                                }
-                            } catch {}
+                        if ($state -match 'Running|Dzia') {
+                            $lsData = "DISPLAY LSSTATUS(*) PORT" | runmqsc $qmName 2>$null
+                            foreach ($l in $lsData) { if ($l -match 'PORT\s*\(\s*(?<p>\d+)\s*\)') { $port = $Matches['p']; break } }
 
-                            try {
-                                $queueOutput = "DISPLAY QLOCAL(*)" | runmqsc $qmName 2>$null
-                                foreach ($qLine in $queueOutput) {
-                                    if ($qLine -match 'QUEUE\s*\(\s*(?<qname>.*?)\s*\)') {
-                                        $qName = $Matches['qname'].Trim()
-                                        if ($qName -notmatch '^SYSTEM\.|^AMQ\.') {
-                                            $queues += @{ QueueName = $qName }
-                                        }
-                                    }
+                            $qData = "DISPLAY QLOCAL(*)" | runmqsc $qmName 2>$null
+                            foreach ($q in $qData) {
+                                if ($q -match 'QUEUE\s*\(\s*(?<qn>.*?)\s*\)') {
+                                    $qn = $Matches['qn'].Trim()
+                                    if ($qn -notmatch '^SYSTEM\.|^AMQ\.') { $queues += @{ QueueName = $qn } }
                                 }
-                            } catch {}
+                            }
                         }
-
-                        $qmgrResults += @{
-                            QueueManager = $qmName
-                            Status       = $cleanState
-                            Port         = $Port
-                            QueueCount   = $queues.Count
-                            Queues       = $queues
-                        }
+                        $qmgrs += @{ QueueManager = $qmName; Status = $state; Port = $port; QueueCount = $queues.Count; Queues = $queues }
                     }
                 }
             }
-        } catch {}
-
-        @{
-            ServerName    = $env:COMPUTERNAME
-            QueueManagers = $qmgrResults
+            @{ ServerName = $env:COMPUTERNAME; QueueManagers = $qmgrs }
         }
-    }
 
-    $mqRaw = Invoke-Command -ComputerName $serverNames -ScriptBlock $mqScriptBlock -ErrorAction SilentlyContinue
-
-    foreach ($r in $mqRaw) {
-        $srvInfo = $mqServers | Where-Object { $_.Server -eq $r.PSComputerName } | Select-Object -First 1
-        [void]$mqResults.Add(@{
-            ServerName    = $r.ServerName
-            Description   = if ($srvInfo) { $srvInfo.Cluster } else { "" }
-            QueueManagers = @($r.QueueManagers)
-            Error         = $null
-        })
-        Write-Log "OK MQ: $($r.ServerName)"
-    }
-
-    # Serwery niedostepne
-    $okServers = @($mqRaw | ForEach-Object { $_.PSComputerName })
-    foreach ($srv in $serverNames) {
-        if ($srv -notin $okServers) {
-            $srvInfo = $mqServers | Where-Object { $_.Server -eq $srv } | Select-Object -First 1
+        foreach ($r in $mqRaw) {
             [void]$mqResults.Add(@{
-                ServerName    = $srv
-                Description   = if ($srvInfo) { $srvInfo.Cluster } else { "" }
-                QueueManagers = @()
-                Error         = "Niedostepny"
+                ServerName    = $r.ServerName
+                Description   = $mqMap[$r.PSComputerName]
+                QueueManagers = @($r.QueueManagers)
+                Error         = $null
             })
-            Write-Log "FAIL MQ: $srv"
+            Write-Log "OK MQ: $($r.ServerName)"
+        }
+
+        $okMQ = @($mqRaw | ForEach-Object { $_.PSComputerName })
+        foreach ($srv in $mqServers) {
+            if ($srv -notin $okMQ) {
+                [void]$mqResults.Add(@{ ServerName = $srv; Description = $mqMap[$srv]; QueueManagers = @(); Error = "Niedostepny" })
+                Write-Log "FAIL MQ: $srv"
+            }
         }
     }
 }
@@ -295,7 +224,7 @@ $mqDuration = [math]::Round(((Get-Date) - $startMQ).TotalSeconds, 1)
     TotalServers       = $mqResults.Count
     Servers            = @($mqResults)
 } | ConvertTo-Json -Depth 10 | Out-File "$DataPath\infra_KolejkiMQ.json" -Encoding UTF8 -Force
-Write-Log "MQ zapisane (${mqDuration}s)"
+Write-Log "MQ: ${mqDuration}s"
 
 # ===================================================================
 $globalDuration = [math]::Round(((Get-Date) - $globalStart).TotalSeconds, 1)
