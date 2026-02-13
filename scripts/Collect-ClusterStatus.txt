@@ -3,11 +3,12 @@
 # Wzor z: Untitled6.ps1, MQ_servers.ps1, MQ_Qmanagers.ps1
 # ZERO JSON — tylko Import-Csv i Export-Csv
 
-# --- SCIEZKI ---
-$BasePath   = "D:\PROD_REPO_DATA\IIS\prodHealtchCheck"
-$DataPath   = "$BasePath\data"
-$ConfigPath = "$BasePath\config"
-$LogsPath   = "$BasePath\logs"
+# --- SCIEZKI Z app-config.json ---
+$ScriptDir  = Split-Path $PSScriptRoot -Parent
+$appConfig  = (Get-Content "$ScriptDir\app-config.json" -Raw).Trim() | ConvertFrom-Json
+$DataPath   = $appConfig.paths.dataPath
+$ConfigPath = $appConfig.paths.configPath
+$LogsPath   = $appConfig.paths.logsPath
 
 if (!(Test-Path $DataPath)) { New-Item -ItemType Directory -Path $DataPath -Force | Out-Null }
 if (!(Test-Path $LogsPath)) { New-Item -ItemType Directory -Path $LogsPath -Force | Out-Null }
@@ -17,9 +18,9 @@ function Log($msg) { "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') [CLUSTERS] $msg"
 
 Log "START Collect-ClusterStatus"
 
-# --- KONFIGURACJA Z CSV ---
-$clustersCfg  = Import-Csv "$ConfigPath\clusters_config.csv"
-$mqServersCfg = Import-Csv "$ConfigPath\mq_servers_config.csv"
+# --- KONFIGURACJA Z CSV (pliki wskazane w app-config.json) ---
+$clustersCfg  = Import-Csv "$ConfigPath\$($appConfig.scripts.'Collect-ClusterStatus'.sourceFile)"
+$mqServersCfg = Import-Csv "$ConfigPath\$($appConfig.scripts.'Collect-ClusterStatus'.mqServersFile)"
 
 $allNodes = @()
 $allRoles = @()

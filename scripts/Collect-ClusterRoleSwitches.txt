@@ -2,11 +2,12 @@
 # Zbiera eventy przelaczen z klastrow SQL i FileShare -> role_switches.csv
 # ZERO JSON — tylko Import-Csv i Export-Csv
 
-# --- SCIEZKI ---
-$BasePath   = "D:\PROD_REPO_DATA\IIS\prodHealtchCheck"
-$DataPath   = "$BasePath\data"
-$ConfigPath = "$BasePath\config"
-$LogsPath   = "$BasePath\logs"
+# --- SCIEZKI Z app-config.json ---
+$ScriptDir  = Split-Path $PSScriptRoot -Parent
+$appConfig  = (Get-Content "$ScriptDir\app-config.json" -Raw).Trim() | ConvertFrom-Json
+$DataPath   = $appConfig.paths.dataPath
+$ConfigPath = $appConfig.paths.configPath
+$LogsPath   = $appConfig.paths.logsPath
 $DaysBack   = 30
 
 if (!(Test-Path $DataPath)) { New-Item -ItemType Directory -Path $DataPath -Force | Out-Null }
@@ -17,8 +18,8 @@ function Log($msg) { "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') [ROLE-SWITCH] $m
 
 Log "START Collect-ClusterRoleSwitches"
 
-# --- KONFIGURACJA Z CSV ---
-$clustersCfg = Import-Csv "$ConfigPath\clusters_config.csv"
+# --- KONFIGURACJA Z CSV (plik wskazany w app-config.json) ---
+$clustersCfg = Import-Csv "$ConfigPath\$($appConfig.scripts.'Collect-ClusterRoleSwitches'.sourceFile)"
 
 # Tylko SQL i FileShare — MQ nie maja FailoverClustering
 $sqlFsServers = @($clustersCfg | Where-Object { $_.ClusterType -ne "MQ" })
