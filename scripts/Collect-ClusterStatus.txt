@@ -1,9 +1,10 @@
 # Collect-ClusterStatus.ps1
-# Prosty skrypt — wzor z Untitled6.ps1 + MQ_servers.ps1 + MQ_Qmanagers.ps1
+# Zbiera status klastrow Windows (SQL, FileShare) oraz grup MQ
+# Wzor: cluster.ps1 / Get-ClusterStatusReport.ps1 (uzywa -Cluster zamiast Invoke-Command)
 
 # --- SCIEZKI ---
 $ScriptDir  = Split-Path $PSScriptRoot -Parent
-$appConfig  = (Get-Content "$ScriptDir\app-config.json" -Raw).Trim() | ConvertFrom-Json
+$appConfig  = Get-Content "$ScriptDir\app-config.json" | ConvertFrom-Json
 $DataPath   = $appConfig.paths.dataPath
 $ConfigPath = $appConfig.paths.configPath
 $LogsPath   = $appConfig.paths.logsPath
@@ -19,84 +20,94 @@ function Log($msg) { "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') [CLUSTERS] $msg"
 Log "START"
 
 # --- KONFIGURACJA ---
-$clustersJson = (Get-Content "$ConfigPath\clusters.json" -Raw).Trim() | ConvertFrom-Json
+$clustersJson = Get-Content "$ConfigPath\clusters.json" | ConvertFrom-Json
 $mqJson       = $null
 $mqFile       = "$ConfigPath\mq_servers.json"
 if (Test-Path $mqFile) {
-    $mqRaw = (Get-Content $mqFile -Raw).Trim()
-    Log "mq_servers.json: $($mqRaw.Length) znakow z $mqFile"
-    Write-Host "MQ config: $($mqRaw.Length) znakow z $mqFile"
-    $mqJson = $mqRaw | ConvertFrom-Json
+    $mqJson = Get-Content $mqFile | ConvertFrom-Json
 }
 
-$allClusters  = @()
-$done         = @{}
+$allClusters = @()
+$done        = @{}
 
 # ==========================================
-# SQL i FileShare — prawdziwe klastry Windows
-# Identycznie jak Untitled6.ps1
+# SQL i FileShare — klastry Windows
+# Wzor z cluster.ps1 — uzywa -Cluster $srv (bez Invoke-Command)
 # ==========================================
 foreach ($def in ($clustersJson.clusters | Where-Object { $_.cluster_type -ne "MQ" })) {
     $type = $def.cluster_type
     foreach ($srv in $def.servers) {
         Log "  Klaster $type : $srv"
         try {
-            # JEDNO wywolanie — wszystko naraz (nazwa klastra + wezly + role)
-            $data = Invoke-Command -ComputerName $srv -ErrorAction Stop -ScriptBlock {
-                $clName = (Get-Cluster).Name
+            # Pobierz nazwe klastra (jak w Get-ClusterStatusReport.ps1)
+            $cluster     = Get-Cluster -Name $srv -ErrorAction Stop
+            $clusterName = $cluster.Name
 
-                $nodes = @(Get-ClusterNode | ForEach-Object {
-                    $n = $_
-                    $ips = (Get-ClusterNetworkInterface -Node $n.Name -ErrorAction SilentlyContinue | ForEach-Object { $_.Address }) -join ", "
-                    [PSCustomObject]@{
-                        Name          = $n.Name
-                        State         = $n.State.ToString()
-                        NodeWeight    = $n.NodeWeight
-                        DynamicWeight = $n.DynamicWeight
-                        IPAddresses   = if ($ips) { $ips } else { "N/A" }
-                    }
-                })
+            # Duplikat? (ten sam klaster z drugiego wezla)
+            if ($done[$clusterName]) { Log "    Pomijam (duplikat $clusterName)"; continue }
+            $done[$clusterName] = $true
 
-                $roles = @(Get-ClusterGroup | ForEach-Object {
-                    $role = $_
-                    try {
-                        $resources = Get-ClusterResource | Where-Object { $_.OwnerGroup -eq $role.Name }
-                        $ipAddr    = ($resources | Where-Object { $_.ResourceType -eq "IP Address" } | ForEach-Object {
-                            try { (Get-ClusterParameter -InputObject $_ -Name Address).Value } catch { "N/A" }
-                        }) -join ", "
-                    } catch { $ipAddr = "N/A" }
+            # Wezly — wzor z cluster.ps1
+            $nodes = @(Get-ClusterNode -Cluster $srv -ErrorAction Stop | ForEach-Object {
+                $node = $_
+                try {
+                    $nodeNetworks = Get-ClusterNetworkInterface -Cluster $srv -Node $node.Name
+                    $ipAddresses  = ($nodeNetworks | ForEach-Object { $_.Address }) -join ", "
+                } catch {
+                    $ipAddresses = "N/A"
+                }
+                [PSCustomObject]@{
+                    Name          = $node.Name
+                    State         = $node.State.ToString()
+                    NodeWeight    = $node.NodeWeight
+                    DynamicWeight = $node.DynamicWeight
+                    IPAddresses   = if ($ipAddresses) { $ipAddresses } else { "N/A" }
+                }
+            })
 
-                    $displayName = $role.Name
-                    if ($role.Name -like "*SQL*" -and $ipAddr -and $ipAddr -ne "N/A" -and $ipAddr -ne "") {
-                        $sqlIP = ($ipAddr -split ", ")[0]
-                        try { $displayName = ([System.Net.Dns]::GetHostEntry($sqlIP)).HostName } catch {}
-                    }
+            # Role — wzor z cluster.ps1
+            $roles = @(Get-ClusterGroup -Cluster $srv -ErrorAction Stop | ForEach-Object {
+                $role = $_
+                try {
+                    $resources = Get-ClusterResource -Cluster $srv | Where-Object { $_.OwnerGroup -eq $role.Name }
+                    $ipAddr    = ($resources | Where-Object { $_.ResourceType -eq "IP Address" } | ForEach-Object {
+                        try { (Get-ClusterParameter -InputObject $_ -Name Address).Value } catch { "N/A" }
+                    }) -join ", "
+                } catch { $ipAddr = "N/A" }
 
-                    [PSCustomObject]@{
-                        Name        = $displayName
-                        State       = $role.State.ToString()
-                        OwnerNode   = $role.OwnerNode.ToString()
-                        IPAddresses = $ipAddr
-                    }
-                })
+                # DNS dla rol SQL
+                $displayName = $role.Name
+                if ($role.Name -like "*SQL*" -and $ipAddr -and $ipAddr -ne "N/A" -and $ipAddr -ne "") {
+                    $sqlIP = ($ipAddr -split ", ")[0]
+                    try { $displayName = ([System.Net.Dns]::GetHostEntry($sqlIP)).HostName } catch {}
+                }
 
-                [PSCustomObject]@{ ClusterName = $clName; Nodes = $nodes; Roles = $roles }
-            }
-
-            # Pomijaj duplikaty (ten sam klaster z drugiego wezla)
-            if ($done[$data.ClusterName]) { Log "    Pomijam (duplikat $($data.ClusterName))"; continue }
-            $done[$data.ClusterName] = $true
+                [PSCustomObject]@{
+                    Name        = $displayName
+                    State       = $role.State.ToString()
+                    OwnerNode   = $role.OwnerNode.ToString()
+                    IPAddresses = if ($ipAddr) { $ipAddr } else { "N/A" }
+                }
+            })
 
             $allClusters += [PSCustomObject]@{
-                ClusterName = $data.ClusterName; ClusterType = $type; Status = "Online"; FQDN = $srv
-                Nodes = @($data.Nodes); Roles = @($data.Roles); Error = $null
+                ClusterName = $clusterName
+                ClusterType = $type
+                Status      = "Online"
+                Nodes       = $nodes
+                Roles       = $roles
+                Error       = $null
             }
-            Log "    OK: $($data.ClusterName) ($(@($data.Nodes).Count) wezlow, $(@($data.Roles).Count) rol)"
+            Log "    OK: $clusterName ($($nodes.Count) wezlow, $($roles.Count) rol)"
 
         } catch {
             $allClusters += [PSCustomObject]@{
-                ClusterName = $srv; ClusterType = $type; Status = "Error"; FQDN = $srv
-                Nodes = @(); Roles = @(); Error = $_.Exception.Message
+                ClusterName = $srv
+                ClusterType = $type
+                Status      = "Error"
+                Nodes       = @()
+                Roles       = @()
+                Error       = $_.Exception.Message
             }
             Log "    FAIL: $($_.Exception.Message)"
         }
@@ -104,8 +115,8 @@ foreach ($def in ($clustersJson.clusters | Where-Object { $_.cluster_type -ne "M
 }
 
 # ==========================================
-# MQ — NIE sa klastrami Windows
-# Wzor z MQ_servers.ps1 + MQ_Qmanagers.ps1
+# MQ — nie sa klastrami Windows
+# Invoke-Command bo dspmq/runmqsc nie maja natywnych cmdletow PS
 # ==========================================
 if ($mqJson) {
     foreach ($grp in $mqJson.PSObject.Properties) {
@@ -117,9 +128,9 @@ if ($mqJson) {
         $mqRoles = @()
         $ok = $false
 
-        # JEDNO wywolanie na WSZYSTKIE serwery grupy — rownolegle
-        $mqRaw = Invoke-Command -ComputerName $servers -ErrorAction SilentlyContinue -ErrorVariable mqErrors -ScriptBlock {
-            $ip = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue | Where-Object { $_.IPAddress -like "10.*" } | Select-Object -First 1).IPAddress
+        $mqRaw = Invoke-Command -ComputerName $servers -ErrorAction SilentlyContinue -ScriptBlock {
+            $ip = (Get-NetIPAddress -AddressFamily IPv4 -ErrorAction SilentlyContinue |
+                   Where-Object { $_.IPAddress -like "10.*" } | Select-Object -First 1).IPAddress
             $qmgrs = @()
             $mqData = dspmq 2>$null
             if ($mqData) {
@@ -144,6 +155,7 @@ if ($mqJson) {
             $mqRoles += @($r.QMgrs)
             $ok = $true
         }
+
         # Serwery ktore nie odpowiedzialy
         $okSrv = @($mqRaw | ForEach-Object { $_.PSComputerName })
         foreach ($srv in $servers) {
@@ -154,8 +166,12 @@ if ($mqJson) {
         }
 
         $allClusters += [PSCustomObject]@{
-            ClusterName = $groupName; ClusterType = "MQ"; Status = $(if ($ok) { "Online" } else { "Error" }); FQDN = ($servers -join ", ")
-            Nodes = $mqNodes; Roles = $mqRoles; Error = $null
+            ClusterName = $groupName
+            ClusterType = "MQ"
+            Status      = $(if ($ok) { "Online" } else { "Error" })
+            Nodes       = $mqNodes
+            Roles       = $mqRoles
+            Error       = $null
         }
         Log "    MQ $groupName : $($mqNodes.Count) nodes, $($mqRoles.Count) qm"
     }

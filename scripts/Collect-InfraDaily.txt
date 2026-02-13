@@ -1,10 +1,10 @@
 # Collect-InfraDaily.ps1
-# Prosty skrypt — FileShares, SQL z CSV, MQ kolejki
-# Wzor: Get-ClusterResources.ps1, MQ_Qmanagers.ps1, MQ_kolejki_lista.ps1
+# Zbiera: udzialy sieciowe, instancje SQL, kolejki MQ
+# Wzor: File_shares.ps1 / db_list.ps1 z D:\PROD_REPO\IIS\Cluster\powershell
 
 # --- SCIEZKI ---
 $ScriptDir  = Split-Path $PSScriptRoot -Parent
-$appConfig  = (Get-Content "$ScriptDir\app-config.json" -Raw).Trim() | ConvertFrom-Json
+$appConfig  = Get-Content "$ScriptDir\app-config.json" | ConvertFrom-Json
 $DataPath   = $appConfig.paths.dataPath
 $ConfigPath = $appConfig.paths.configPath
 $LogsPath   = $appConfig.paths.logsPath
@@ -17,20 +17,17 @@ function Log($msg) { "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') [INFRA] $msg" | 
 
 Log "=== START Collect-InfraDaily ==="
 
-$clustersJson = (Get-Content "$ConfigPath\clusters.json" -Raw).Trim() | ConvertFrom-Json
+$clustersJson = Get-Content "$ConfigPath\clusters.json" | ConvertFrom-Json
 $mqJson       = $null
 $mqFile       = "$ConfigPath\mq_servers.json"
 if (Test-Path $mqFile) {
-    $mqRaw = (Get-Content $mqFile -Raw).Trim()
-    Log "mq_servers.json: $($mqRaw.Length) znakow z $mqFile"
-    Write-Host "MQ config: $($mqRaw.Length) znakow z $mqFile"
-    $mqJson = $mqRaw | ConvertFrom-Json
+    $mqJson = Get-Content $mqFile | ConvertFrom-Json
 }
 
 
 # ==========================================
 # 1. UDZIALY SIECIOWE
-# Wzor z Get-ClusterResources.ps1: Get-SmbShare -CimSession
+# Wzor z File_shares.ps1: Get-SmbShare -CimSession | Where-Object { $_.Path -and $_.ShareType -ne 'Special' }
 # ==========================================
 Log "--- Udzialy sieciowe ---"
 $shareResults = @()
@@ -40,9 +37,15 @@ $fsServers = @($clustersJson.clusters | Where-Object { $_.cluster_type -eq "File
 foreach ($srv in $fsServers) {
     Log "  FileShare: $srv"
     try {
-        $shares = @(Get-SmbShare -CimSession $srv -Special $false -ErrorAction Stop | ForEach-Object {
-            [PSCustomObject]@{ ShareName = $_.Name; SharePath = $_.Path; ShareState = "Online" }
-        })
+        $shares = @(Get-SmbShare -CimSession $srv -ErrorAction Stop |
+                    Where-Object { $_.Path -and $_.ShareType -ne 'Special' } |
+                    ForEach-Object {
+                        [PSCustomObject]@{
+                            ShareName  = $_.Name
+                            SharePath  = $_.Path
+                            ShareState = if ($_.ShareState) { $_.ShareState.ToString() } else { "Online" }
+                        }
+                    })
         $shareResults += [PSCustomObject]@{ ServerName = $srv; ShareCount = $shares.Count; Shares = $shares; Error = $null }
         Log "    OK: $($shares.Count) udzialow"
     } catch {
@@ -110,7 +113,7 @@ Log "SQL: $($sqlResults.Count) serwerow"
 
 # ==========================================
 # 3. KOLEJKI MQ
-# Wzor z MQ_Qmanagers.ps1 + MQ_kolejki_lista.ps1
+# Invoke-Command bo dspmq/runmqsc nie maja natywnych cmdletow PS
 # ==========================================
 Log "--- Kolejki MQ ---"
 $mqResults = @()
@@ -127,8 +130,8 @@ if ($mqJson) {
     }
     Log "  MQ serwery: $($allMQServers -join ', ')"
 
-    # JEDNO wywolanie na WSZYSTKIE serwery MQ — rownolegle
-    $mqRawAll = Invoke-Command -ComputerName $allMQServers -ErrorAction SilentlyContinue -ErrorVariable mqErrs -ScriptBlock {
+    # Jedno wywolanie na WSZYSTKIE serwery MQ — rownolegle
+    $mqRawAll = Invoke-Command -ComputerName $allMQServers -ErrorAction SilentlyContinue -ScriptBlock {
         $qmgrs = @()
         $mqData = dspmq 2>$null
         if ($mqData) {
@@ -144,7 +147,10 @@ if ($mqJson) {
                         if ($ls) { foreach ($l in $ls) { if ($l -match 'PORT\s*\(\s*(?<p>\d+)\s*\)') { $port = $Matches['p']; break } } }
 
                         $qd = "DISPLAY QLOCAL(*)" | runmqsc $qmName 2>$null
-                        if ($qd) { foreach ($q in $qd) { if ($q -match 'QUEUE\s*\(\s*(?<qn>.*?)\s*\)') { $qn = $Matches['qn'].Trim(); if ($qn -notmatch '^SYSTEM\.|^AMQ\.') { $queues += [PSCustomObject]@{ QueueName = $qn } } } } }
+                        if ($qd) { foreach ($q in $qd) { if ($q -match 'QUEUE\s*\(\s*(?<qn>.*?)\s*\)') {
+                            $qn = $Matches['qn'].Trim()
+                            if ($qn -notmatch '^SYSTEM\.|^AMQ\.') { $queues += [PSCustomObject]@{ QueueName = $qn } }
+                        } } }
                     }
 
                     $qmgrs += [PSCustomObject]@{ QueueManager = $qmName; Status = $state; Port = $port; QueueCount = $queues.Count; Queues = $queues }

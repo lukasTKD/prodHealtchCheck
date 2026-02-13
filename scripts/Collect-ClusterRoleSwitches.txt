@@ -1,9 +1,11 @@
 # Collect-ClusterRoleSwitches.ps1
-# Prosty skrypt — eventy przelaczen z klastrow SQL i FileShare
+# Zbiera historie przelaczen rol klastrow SQL i FileShare
+# Dane: kiedy rola zatrzymana, kiedy uruchomiona, jaka rola, na jakim serwerze
+# Wzor: Get-ClusterStatusReport.ps1 (uzywa -Cluster zamiast Invoke-Command)
 
 # --- SCIEZKI ---
 $ScriptDir  = Split-Path $PSScriptRoot -Parent
-$appConfig  = (Get-Content "$ScriptDir\app-config.json" -Raw).Trim() | ConvertFrom-Json
+$appConfig  = Get-Content "$ScriptDir\app-config.json" | ConvertFrom-Json
 $DataPath   = $appConfig.paths.dataPath
 $ConfigPath = $appConfig.paths.configPath
 $LogsPath   = $appConfig.paths.logsPath
@@ -19,63 +21,49 @@ function Log($msg) { "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') [ROLE-SWITCH] $m
 
 Log "START"
 
-$clustersJson = (Get-Content "$ConfigPath\clusters.json" -Raw).Trim() | ConvertFrom-Json
+$clustersJson = Get-Content "$ConfigPath\clusters.json" | ConvertFrom-Json
 
 # Tylko SQL i FileShare — MQ nie maja FailoverClustering
-$clusterServers = @($clustersJson.clusters | Where-Object { $_.cluster_type -ne "MQ" })
-Write-Host "Klastry (SQL+FS): $($clusterServers.Count)"
-foreach ($def in $clusterServers) { Write-Host "  $($def.cluster_type): $($def.servers -join ', ')" }
+$clusterDefs = @($clustersJson.clusters | Where-Object { $_.cluster_type -ne "MQ" })
 
-if ($clusterServers.Count -eq 0) {
+if ($clusterDefs.Count -eq 0) {
     Log "Brak klastrow SQL/FileShare"
     @{ LastUpdate = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss"); DaysBack = $DaysBack; TotalEvents = 0; Switches = @() } |
         ConvertTo-Json -Depth 10 | Out-File $OutputFile -Encoding UTF8 -Force
     exit 0
 }
 
-# Krok 1: Pobierz wezly — jedno Invoke-Command na pierwszy serwer z kazdego klastra
+# Krok 1: Pobierz wezly z kazdego klastra (uzywa -Cluster jak w cluster.ps1)
 $nodeMap  = @()
 $done     = @{}
 $allNodes = @()
 
-# Zbierz po jednym serwerze z kazdego klastra (unikamy duplikatow od razu)
-$firstServers = @()
-$srvTypeMap   = @{}
-foreach ($def in $clusterServers) {
-    $srv = $def.servers[0]
-    $firstServers += $srv
-    $srvTypeMap[$srv] = $def.cluster_type
-}
-Write-Host "Odpytuje serwery: $($firstServers -join ', ')"
+foreach ($def in $clusterDefs) {
+    $type = $def.cluster_type
+    foreach ($srv in $def.servers) {
+        try {
+            $cluster     = Get-Cluster -Name $srv -ErrorAction Stop
+            $clusterName = $cluster.Name
 
-# Jedno rownolegle wywolanie
-$clusterInfos = Invoke-Command -ComputerName $firstServers -ErrorAction SilentlyContinue -ErrorVariable nodeErrors -ScriptBlock {
-    [PSCustomObject]@{
-        ClusterName = (Get-Cluster).Name
-        Nodes       = @(Get-ClusterNode | Select-Object -ExpandProperty Name)
+            if ($done[$clusterName]) { continue }
+            $done[$clusterName] = $true
+
+            $clusterNodes = @(Get-ClusterNode -Cluster $srv -ErrorAction Stop | Select-Object -ExpandProperty Name)
+            foreach ($node in $clusterNodes) {
+                $nodeMap  += [PSCustomObject]@{ ClusterName = $clusterName; ClusterType = $type; NodeName = $node }
+                $allNodes += $node
+            }
+            Log "  $clusterName ($type): $($clusterNodes.Count) wezlow"
+        } catch {
+            Log "  FAIL $srv : $($_.Exception.Message)"
+        }
     }
 }
-
-foreach ($info in $clusterInfos) {
-    $originSrv = $info.PSComputerName
-    $type = $srvTypeMap[$originSrv]
-    if ($done[$info.ClusterName]) { continue }
-    $done[$info.ClusterName] = $true
-
-    foreach ($node in $info.Nodes) {
-        $nodeMap  += [PSCustomObject]@{ ClusterName = $info.ClusterName; ClusterType = $type; NodeName = $node }
-        $allNodes += $node
-    }
-    Log "  $($info.ClusterName) ($type): $($info.Nodes.Count) wezlow"
-}
-foreach ($err in $nodeErrors) { Log "  FAIL: $($err.TargetObject) - $($err.Exception.Message)"; Write-Host "  BLAD: $($err.TargetObject) - $($err.Exception.Message)" -ForegroundColor Red }
-Write-Host "Klastry znalezione: $(if ($clusterInfos) { @($clusterInfos).Count } else { 0 })"
 
 $allNodes = @($allNodes | Sort-Object -Unique)
-Write-Host "Wezly ($($allNodes.Count)): $($allNodes -join ', ')"
-Log "Odpytuje $($allNodes.Count) wezlow..."
+Log "Odpytuje $($allNodes.Count) wezlow: $($allNodes -join ', ')"
 
-# Krok 2: Pobierz eventy
+# Krok 2: Pobierz eventy przelaczen
 $eventIDs  = @(1069, 1070, 1071, 1201, 1202, 1205, 1564, 1566)
 $startDate = (Get-Date).AddDays(-$DaysBack)
 $switches  = @()
@@ -91,19 +79,29 @@ if ($allNodes.Count -gt 0) {
             } -ErrorAction SilentlyContinue | ForEach-Object {
                 $msg = $_.Message
                 $role = ""; $target = ""; $source = ""
-                if ($msg -match "Cluster group '([^']+)'")     { $role   = $Matches[1] }
-                elseif ($msg -match "Cluster resource '([^']+)'") { $role = $Matches[1] }
-                if ($msg -match "node '([^']+)'")        { $target = $Matches[1] }
-                if ($msg -match "from node '([^']+)'")   { $source = $Matches[1] }
+                if ($msg -match "Cluster group '([^']+)'")        { $role   = $Matches[1] }
+                elseif ($msg -match "Cluster resource '([^']+)'") { $role   = $Matches[1] }
+                if ($msg -match "node '([^']+)'")                 { $target = $Matches[1] }
+                if ($msg -match "from node '([^']+)'")            { $source = $Matches[1] }
 
                 [PSCustomObject]@{
                     TimeCreated = $_.TimeCreated.ToString("yyyy-MM-dd HH:mm:ss")
                     EventId     = $_.Id
-                    EventType   = switch ($_.Id) { 1069 {"ResourceOnline"} 1070 {"ResourceOffline"} 1071 {"ResourceFailed"} 1201 {"GroupOnline"} 1202 {"GroupOffline"} 1205 {"GroupMoved"} 1564 {"FailoverStarted"} 1566 {"FailoverCompleted"} default {"Unknown"} }
-                    RoleName    = $role
-                    SourceNode  = $source
-                    TargetNode  = $target
-                    ServerName  = $env:COMPUTERNAME
+                    EventType   = switch ($_.Id) {
+                        1069 { "ResourceOnline" }
+                        1070 { "ResourceOffline" }
+                        1071 { "ResourceFailed" }
+                        1201 { "GroupOnline" }
+                        1202 { "GroupOffline" }
+                        1205 { "GroupMoved" }
+                        1564 { "FailoverStarted" }
+                        1566 { "FailoverCompleted" }
+                        default { "Unknown" }
+                    }
+                    RoleName   = $role
+                    SourceNode = $source
+                    TargetNode = $target
+                    ServerName = $env:COMPUTERNAME
                 }
             }
         } catch {}
@@ -126,7 +124,7 @@ if ($allNodes.Count -gt 0) {
     }
 }
 
-# Deduplikacja
+# Deduplikacja i sortowanie
 $seen   = @{}
 $unique = @()
 $switches = @($switches | Sort-Object { $_.TimeCreated } -Descending)
@@ -134,7 +132,6 @@ foreach ($s in $switches) {
     $key = "$($s.TimeCreated)|$($s.EventId)|$($s.RoleName)|$($s.ClusterName)"
     if (!$seen[$key]) { $seen[$key] = $true; $unique += $s }
 }
-Write-Host "Eventy: $($switches.Count) surowych, $($unique.Count) unikalnych"
 
 @{
     LastUpdate  = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
