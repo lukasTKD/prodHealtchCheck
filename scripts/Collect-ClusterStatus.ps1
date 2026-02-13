@@ -4,7 +4,7 @@
 
 # --- SCIEZKI ---
 $ScriptDir  = Split-Path $PSScriptRoot -Parent
-$appConfig  = Get-Content "$ScriptDir\app-config.json" | ConvertFrom-Json
+$appConfig  = [System.IO.File]::ReadAllText("$ScriptDir\app-config.json") | ConvertFrom-Json
 $DataPath   = $appConfig.paths.dataPath
 $ConfigPath = $appConfig.paths.configPath
 $LogsPath   = $appConfig.paths.logsPath
@@ -20,11 +20,11 @@ function Log($msg) { "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') [CLUSTERS] $msg"
 Log "START"
 
 # --- KONFIGURACJA ---
-$clustersJson = Get-Content "$ConfigPath\clusters.json" | ConvertFrom-Json
+$clustersJson = [System.IO.File]::ReadAllText("$ConfigPath\clusters.json") | ConvertFrom-Json
 $mqJson       = $null
 $mqFile       = "$ConfigPath\mq_servers.json"
 if (Test-Path $mqFile) {
-    $mqJson = Get-Content $mqFile | ConvertFrom-Json
+    $mqJson = [System.IO.File]::ReadAllText($mqFile) | ConvertFrom-Json
 }
 
 $allClusters = @()

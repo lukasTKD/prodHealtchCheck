@@ -5,7 +5,7 @@
 
 # --- SCIEZKI ---
 $ScriptDir  = Split-Path $PSScriptRoot -Parent
-$appConfig  = Get-Content "$ScriptDir\app-config.json" | ConvertFrom-Json
+$appConfig  = [System.IO.File]::ReadAllText("$ScriptDir\app-config.json") | ConvertFrom-Json
 $DataPath   = $appConfig.paths.dataPath
 $ConfigPath = $appConfig.paths.configPath
 $LogsPath   = $appConfig.paths.logsPath
@@ -21,7 +21,7 @@ function Log($msg) { "$(Get-Date -Format 'yyyy-MM-dd HH:mm:ss') [ROLE-SWITCH] $m
 
 Log "START"
 
-$clustersJson = Get-Content "$ConfigPath\clusters.json" | ConvertFrom-Json
+$clustersJson = [System.IO.File]::ReadAllText("$ConfigPath\clusters.json") | ConvertFrom-Json
 
 # Tylko SQL i FileShare — MQ nie maja FailoverClustering
 $clusterDefs = @($clustersJson.clusters | Where-Object { $_.cluster_type -ne "MQ" })
