@@ -30,7 +30,22 @@ if (Test-Path $ConfigFile) {
     }
 }
 
-$ServerListPath = "$AppConfigPath\serverList_$Group.txt"
+# Znajdź plik z listą serwerów w różnych lokalizacjach
+$possiblePaths = @(
+    "$AppConfigPath\serverList_$Group.txt",
+    "$BasePath\serverList_$Group.txt"
+)
+$ServerListPath = $null
+foreach ($path in $possiblePaths) {
+    if (Test-Path $path) {
+        $ServerListPath = $path
+        break
+    }
+}
+if (-not $ServerListPath) {
+    $ServerListPath = $possiblePaths[0]  # Domyślna ścieżka dla komunikatu o błędzie
+}
+
 $OutputPath = "$DataPath\serverHealth_$Group.json"
 $LogPath = "$LogsPath\ServerHealthMonitor.log"
 $LogMaxAgeHours = 48

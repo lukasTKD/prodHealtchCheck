@@ -30,7 +30,6 @@ if (Test-Path $ConfigFile) {
     }
 }
 
-$ClustersConfigPath = "$ConfigPath\clusters.json"
 $OutputPath = "$DataPath\infra_PrzelaczeniaRol.json"
 $LogPath = "$LogsPath\ServerHealthMonitor.log"
 $LogMaxAgeHours = 48
@@ -54,10 +53,30 @@ function Write-Log {
 }
 
 # --- Wczytaj konfigurację klastrów ---
-if (-not (Test-Path $ClustersConfigPath)) {
-    Write-Log "BLAD: Brak pliku konfiguracji: $ClustersConfigPath"
+# Sprawdź kilka możliwych lokalizacji pliku clusters.json
+$possiblePaths = @(
+    "$ConfigPath\clusters.json",
+    "$BasePath\clusters.json",
+    "D:\PROD_REPO_DATA\IIS\Cluster\clusters.json"
+)
+
+$ClustersConfigPath = $null
+foreach ($path in $possiblePaths) {
+    if (Test-Path $path) {
+        $ClustersConfigPath = $path
+        break
+    }
+}
+
+if (-not $ClustersConfigPath) {
+    Write-Log "BLAD: Brak pliku konfiguracji clusters.json. Sprawdzono:"
+    foreach ($path in $possiblePaths) {
+        Write-Log "  - $path"
+    }
     exit 1
 }
+
+Write-Log "Uzywam konfiguracji: $ClustersConfigPath"
 
 $config = Get-Content $ClustersConfigPath -Raw | ConvertFrom-Json
 $allClusters = @($config.clusters)

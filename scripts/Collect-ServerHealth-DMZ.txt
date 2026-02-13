@@ -27,7 +27,22 @@ if (Test-Path $ConfigFile) {
     }
 }
 
-$ConfigPath = "$AppConfigPath\serverList_DMZ.json"
+# Znajdź plik konfiguracji DMZ w różnych lokalizacjach
+$possiblePaths = @(
+    "$AppConfigPath\serverList_DMZ.json",
+    "$BasePath\serverList_DMZ.json"
+)
+$ConfigPath = $null
+foreach ($path in $possiblePaths) {
+    if (Test-Path $path) {
+        $ConfigPath = $path
+        break
+    }
+}
+if (-not $ConfigPath) {
+    $ConfigPath = $possiblePaths[0]  # Domyślna ścieżka dla komunikatu o błędzie
+}
+
 $OutputPath = "$DataPath\serverHealth_DMZ.json"
 $LogPath = "$LogsPath\ServerHealthMonitor.log"
 $LogMaxAgeHours = 48

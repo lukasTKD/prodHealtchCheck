@@ -30,11 +30,33 @@ if (Test-Path $ConfigFile) {
     }
 }
 
-$MQConfigPath = "$ConfigPath\config_mq.json"
-$FileShareCSVPath = "$ConfigPath\fileshare.csv"
-$SQLDetailsCSVPath = "$ConfigPath\sql_db_details.csv"
 $LogPath = "$LogsPath\ServerHealthMonitor.log"
 $LogMaxAgeHours = 48
+
+# Funkcja do znalezienia pliku w kilku lokalizacjach
+function Find-ConfigFile {
+    param([string]$FileName, [string[]]$AlternativeNames = @())
+    $names = @($FileName) + $AlternativeNames
+    $basePaths = @(
+        $ConfigPath,
+        $BasePath,
+        "D:\PROD_REPO_DATA\IIS\Cluster\data",
+        "D:\PROD_REPO_DATA\IIS\Cluster"
+    )
+    foreach ($bp in $basePaths) {
+        foreach ($name in $names) {
+            $path = Join-Path $bp $name
+            if (Test-Path $path) {
+                return $path
+            }
+        }
+    }
+    return $null
+}
+
+$MQConfigPath = Find-ConfigFile "config_mq.json"
+$FileShareCSVPath = Find-ConfigFile "fileshare.csv" @("fileShare.csv")
+$SQLDetailsCSVPath = Find-ConfigFile "sql_db_details.csv"
 
 $ErrorActionPreference = "Continue"
 
