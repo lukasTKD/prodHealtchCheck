@@ -34,15 +34,34 @@ function Write-Log {
 }
 
 Write-Log "=== START Collect-InfraDaily ==="
+Write-Log "ConfigPath=$ConfigPath, DataPath=$DataPath"
 $globalStart = Get-Date
 
 # --- Konfiguracje ---
 $ClustersConfigPath = "$ConfigPath\clusters.json"
 if (-not (Test-Path $ClustersConfigPath)) { $ClustersConfigPath = "D:\PROD_REPO_DATA\IIS\Cluster\clusters.json" }
-$clustersConfig = if (Test-Path $ClustersConfigPath) { Get-Content $ClustersConfigPath -Raw | ConvertFrom-Json } else { $null }
+Write-Log "Clusters config: $ClustersConfigPath (istnieje: $(Test-Path $ClustersConfigPath))"
+$clustersConfig = $null
+if (Test-Path $ClustersConfigPath) {
+    try {
+        $rawClusters = (Get-Content $ClustersConfigPath -Raw -ErrorAction Stop).Trim()
+        if ($rawClusters -and $rawClusters.Length -gt 2) { $clustersConfig = $rawClusters | ConvertFrom-Json }
+    } catch {
+        Write-Log "BLAD parsowania clusters.json: $($_.Exception.Message)"
+    }
+}
 
 $MQConfigPath = "$ConfigPath\mq_servers.json"
-$mqConfig = if (Test-Path $MQConfigPath) { Get-Content $MQConfigPath -Raw | ConvertFrom-Json } else { $null }
+Write-Log "MQ config: $MQConfigPath (istnieje: $(Test-Path $MQConfigPath))"
+$mqConfig = $null
+if (Test-Path $MQConfigPath) {
+    try {
+        $rawMQ = (Get-Content $MQConfigPath -Raw -ErrorAction Stop).Trim()
+        if ($rawMQ -and $rawMQ.Length -gt 2) { $mqConfig = $rawMQ | ConvertFrom-Json }
+    } catch {
+        Write-Log "BLAD parsowania mq_servers.json: $($_.Exception.Message)"
+    }
+}
 
 
 # =====================================================================

@@ -36,6 +36,7 @@ function Write-Log {
 }
 
 # --- Wczytaj konfiguracje ---
+Write-Log "ConfigPath=$ConfigPath, DataPath=$DataPath"
 $possiblePaths = @(
     "$ConfigPath\clusters.json",
     "D:\PROD_REPO_DATA\IIS\Cluster\clusters.json"
@@ -51,7 +52,19 @@ if (-not $ClustersConfigPath) {
     exit 1
 }
 
-$config = Get-Content $ClustersConfigPath -Raw | ConvertFrom-Json
+$config = $null
+try {
+    $rawJson = (Get-Content $ClustersConfigPath -Raw -ErrorAction Stop).Trim()
+    if ($rawJson -and $rawJson.Length -gt 2) { $config = $rawJson | ConvertFrom-Json }
+} catch {
+    Write-Log "BLAD parsowania clusters.json: $($_.Exception.Message)"
+}
+if (-not $config) {
+    Write-Log "BLAD: Nie mozna odczytac clusters.json"
+    @{ LastUpdate = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss"); DaysBack = $DaysBack; TotalEvents = 0; Switches = @() } |
+        ConvertTo-Json -Depth 10 | Out-File $OutputPath -Encoding UTF8 -Force
+    exit 1
+}
 
 # TYLKO klastry SQL i FileShare (MQ nie maja FailoverClustering)
 $clusterServers = @($config.clusters |

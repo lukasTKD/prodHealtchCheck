@@ -35,6 +35,7 @@ function Write-Log {
 }
 
 # --- Wczytaj konfiguracje ---
+Write-Log "ScriptPath=$ScriptPath, ConfigPath=$ConfigPath, DataPath=$DataPath"
 $possiblePaths = @(
     "$ConfigPath\clusters.json",
     "D:\PROD_REPO_DATA\IIS\Cluster\clusters.json"
@@ -51,11 +52,39 @@ if (-not $ClustersConfigPath) {
 }
 
 Write-Log "Konfiguracja: $ClustersConfigPath"
-$config = Get-Content $ClustersConfigPath -Raw | ConvertFrom-Json
+$config = $null
+try {
+    $rawJson = (Get-Content $ClustersConfigPath -Raw -ErrorAction Stop).Trim()
+    if ($rawJson) { $config = $rawJson | ConvertFrom-Json }
+} catch {
+    Write-Log "BLAD parsowania clusters.json: $($_.Exception.Message)"
+}
+if (-not $config) {
+    Write-Log "BLAD: Nie mozna odczytac clusters.json"
+    @{ LastUpdate = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss"); TotalClusters = 0; Clusters = @(); Error = "Blad odczytu clusters.json" } |
+        ConvertTo-Json -Depth 10 | Out-File $OutputPath -Encoding UTF8 -Force
+    exit 1
+}
 
 # Konfiguracja MQ serwerow (dla typow MQ - nie sa klastrami Windows)
 $MQConfigPath = "$ConfigPath\mq_servers.json"
-$mqConfig = if (Test-Path $MQConfigPath) { Get-Content $MQConfigPath -Raw | ConvertFrom-Json } else { $null }
+Write-Log "MQ config path: $MQConfigPath (istnieje: $(Test-Path $MQConfigPath))"
+$mqConfig = $null
+if (Test-Path $MQConfigPath) {
+    try {
+        $rawMQ = (Get-Content $MQConfigPath -Raw -ErrorAction Stop).Trim()
+        if ($rawMQ -and $rawMQ.Length -gt 2) {
+            $mqConfig = $rawMQ | ConvertFrom-Json
+            Write-Log "MQ config OK: $($mqConfig.PSObject.Properties.Count) grup"
+        } else {
+            Write-Log "WARN: mq_servers.json pusty lub za krotki ($($rawMQ.Length) znakow)"
+        }
+    } catch {
+        Write-Log "WARN: Blad parsowania mq_servers.json: $($_.Exception.Message)"
+    }
+} else {
+    Write-Log "INFO: Brak pliku mq_servers.json"
+}
 
 Write-Log "=== START zbierania statusu klastrow ==="
 $startTime = Get-Date
