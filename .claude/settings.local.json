@@ -12,7 +12,9 @@
       "Bash(git commit:*)",
       "Bash(git diff:*)",
       "Bash(git checkout:*)",
-      "Bash(if exist \"D:\\\\PROD_REPO_DATA\\\\IIS\\\\prodHealtchCheck\\\\data\\\\clusters.json\" type \"D:\\\\PROD_REPO_DATA\\\\IIS\\\\prodHealtchCheck\\\\data\\\\clusters.json\")"
+      "Bash(if exist \"D:\\\\PROD_REPO_DATA\\\\IIS\\\\prodHealtchCheck\\\\data\\\\clusters.json\" type \"D:\\\\PROD_REPO_DATA\\\\IIS\\\\prodHealtchCheck\\\\data\\\\clusters.json\")",
+      "Bash(grep:*)",
+      "Bash(xargs -I {} sh -c 'echo \"\"=== {} ===\"\" && grep -E \"\"Out-File.*\\\\.json|infra_|serverHealth_\"\" {}')"
     ]
   }
 }

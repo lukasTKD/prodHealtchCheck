@@ -13,7 +13,8 @@ $LogsPath   = $appConfig.paths.logsPath
 if (!(Test-Path $DataPath)) { New-Item -ItemType Directory -Path $DataPath -Force | Out-Null }
 if (!(Test-Path $LogsPath)) { New-Item -ItemType Directory -Path $LogsPath -Force | Out-Null }
 
-$OutputFile = "$DataPath\infra_PrzelaczeniaRol.json"
+# Plik wyjsciowy z konfiguracji
+$OutputFile = Join-Path $DataPath $appConfig.outputs.infra.przelaczeniaRol
 $LogFile    = "$LogsPath\ServerHealthMonitor.log"
 $DaysBack   = 30
 

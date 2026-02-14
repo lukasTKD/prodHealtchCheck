@@ -66,13 +66,22 @@ try {
     Write-Log "BLAD: Collect-ServerHealth-DMZ.ps1 - $($_.Exception.Message)"
 }
 
-# Status klastrów Windows (co 5 min razem z kondycją serwerów)
+# Status klastrów Windows (SQL, FileShare)
 Write-Log "Uruchamiam: Collect-ClusterStatus.ps1"
 try {
     & "$ScriptPath\Collect-ClusterStatus.ps1"
     Write-Log "Zakonczono: Collect-ClusterStatus.ps1"
 } catch {
     Write-Log "BLAD: Collect-ClusterStatus.ps1 - $($_.Exception.Message)"
+}
+
+# Status klastrów WMQ
+Write-Log "Uruchamiam: Collect-WMQClusterStatus.ps1"
+try {
+    & "$ScriptPath\Collect-WMQClusterStatus.ps1"
+    Write-Log "Zakonczono: Collect-WMQClusterStatus.ps1"
+} catch {
+    Write-Log "BLAD: Collect-WMQClusterStatus.ps1 - $($_.Exception.Message)"
 }
 
 Write-Log "=== KONIEC zbierania dla wszystkich grup ==="
