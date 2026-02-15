@@ -46,7 +46,7 @@ function Write-Log {
 Write-Log "=== START zbierania dla wszystkich grup ==="
 Write-Log "Konfiguracja: BasePath=$BasePath, LogsPath=$LogsPath"
 
-# Grupy LAN
+# Grupy LAN - ServerHealth
 foreach ($Group in $Groups) {
     Write-Log "Uruchamiam: Collect-ServerHealth.ps1 -Group $Group"
     try {
@@ -66,22 +66,31 @@ try {
     Write-Log "BLAD: Collect-ServerHealth-DMZ.ps1 - $($_.Exception.Message)"
 }
 
-# Status klastrów Windows (SQL, FileShare)
-Write-Log "Uruchamiam: Collect-ClusterStatus.ps1"
+# Klastry Windows (SQL, FileShare) + historia przelaczen rol
+Write-Log "Uruchamiam: Collect-ClusterData.ps1"
 try {
-    & "$ScriptPath\Collect-ClusterStatus.ps1"
-    Write-Log "Zakonczono: Collect-ClusterStatus.ps1"
+    & "$ScriptPath\Collect-ClusterData.ps1"
+    Write-Log "Zakonczono: Collect-ClusterData.ps1"
 } catch {
-    Write-Log "BLAD: Collect-ClusterStatus.ps1 - $($_.Exception.Message)"
+    Write-Log "BLAD: Collect-ClusterData.ps1 - $($_.Exception.Message)"
 }
 
-# Status klastrów WMQ
-Write-Log "Uruchamiam: Collect-WMQClusterStatus.ps1"
+# Dane MQ (kolejki + klastry WMQ)
+Write-Log "Uruchamiam: Collect-MQData.ps1"
 try {
-    & "$ScriptPath\Collect-WMQClusterStatus.ps1"
-    Write-Log "Zakonczono: Collect-WMQClusterStatus.ps1"
+    & "$ScriptPath\Collect-MQData.ps1"
+    Write-Log "Zakonczono: Collect-MQData.ps1"
 } catch {
-    Write-Log "BLAD: Collect-WMQClusterStatus.ps1 - $($_.Exception.Message)"
+    Write-Log "BLAD: Collect-MQData.ps1 - $($_.Exception.Message)"
+}
+
+# Dane infrastruktury (instancje SQL + udzialy sieciowe)
+Write-Log "Uruchamiam: Collect-InfraData.ps1"
+try {
+    & "$ScriptPath\Collect-InfraData.ps1"
+    Write-Log "Zakonczono: Collect-InfraData.ps1"
+} catch {
+    Write-Log "BLAD: Collect-InfraData.ps1 - $($_.Exception.Message)"
 }
 
 Write-Log "=== KONIEC zbierania dla wszystkich grup ==="
