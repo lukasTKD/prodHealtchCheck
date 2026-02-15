@@ -130,11 +130,20 @@ $ScriptBlock = {
                 if ($line -match 'QMNAME\s*\(\s*(?<qm>[^\)]+)\s*\).*?STATUS\s*\(\s*(?<stat>[^\)]+)\s*\)') {
                     $qmName = $Matches['qm'].Trim()
                     $status = $Matches['stat'].Trim()
-                    $normalizedStatus = if ($status -match 'Running|Dzia') { "Running" } else { "Stopped" }
+
+                    # Normalizacja statusu z uwzglednieniem Standby
+                    $normalizedStatus = switch -Regex ($status) {
+                        'Running|Dzia'           { "Running" }
+                        'Standby|As standby'     { "Standby" }
+                        'Starting|Urucham'       { "Starting" }
+                        'Quiescing|Wygasz'       { "Quiescing" }
+                        default                  { "Stopped" }
+                    }
 
                     $port = ""
                     $queues = @()
 
+                    # Pobierz dane tylko jesli QM dziala (Running)
                     if ($normalizedStatus -eq "Running") {
                         # Pobierz port
                         try {
@@ -147,14 +156,45 @@ $ScriptBlock = {
                             }
                         } catch {}
 
-                        # Pobierz kolejki (bez systemowych)
+                        # Pobierz kolejki ze statusem (bez systemowych)
                         try {
-                            $qData = "DISPLAY QLOCAL(*)" | runmqsc $qmName 2>$null
+                            # Pobierz nazwy kolejek
+                            $qData = "DISPLAY QLOCAL(*) GET PUT" | runmqsc $qmName 2>$null
+                            $currentQueue = $null
+
                             foreach ($q in $qData) {
                                 if ($q -match 'QUEUE\s*\(\s*([^\)]+)\s*\)') {
                                     $qn = $Matches[1].Trim()
                                     if ($qn -notmatch '^SYSTEM\.|^AMQ\.') {
-                                        $queues += @{ QueueName = $qn }
+                                        $currentQueue = @{
+                                            QueueName = $qn
+                                            GetEnabled = $true
+                                            PutEnabled = $true
+                                            CurrentDepth = 0
+                                        }
+                                        $queues += $currentQueue
+                                    } else {
+                                        $currentQueue = $null
+                                    }
+                                }
+                                if ($currentQueue) {
+                                    if ($q -match 'GET\s*\(\s*([^\)]+)\s*\)') {
+                                        $currentQueue.GetEnabled = ($Matches[1].Trim() -eq "ENABLED")
+                                    }
+                                    if ($q -match 'PUT\s*\(\s*([^\)]+)\s*\)') {
+                                        $currentQueue.PutEnabled = ($Matches[1].Trim() -eq "ENABLED")
+                                    }
+                                }
+                            }
+
+                            # Pobierz CURDEPTH dla kolejek
+                            $qsData = "DISPLAY QSTATUS(*) CURDEPTH" | runmqsc $qmName 2>$null
+                            foreach ($qs in $qsData) {
+                                if ($qs -match 'QUEUE\s*\(\s*([^\)]+)\s*\)') {
+                                    $qsName = $Matches[1].Trim()
+                                    $matchingQueue = $queues | Where-Object { $_.QueueName -eq $qsName }
+                                    if ($matchingQueue -and $qs -match 'CURDEPTH\s*\(\s*(\d+)\s*\)') {
+                                        $matchingQueue.CurrentDepth = [int]$Matches[1]
                                     }
                                 }
                             }
