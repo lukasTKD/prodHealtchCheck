@@ -156,45 +156,14 @@ $ScriptBlock = {
                             }
                         } catch {}
 
-                        # Pobierz kolejki ze statusem (bez systemowych)
+                        # Pobierz kolejki (bez systemowych)
                         try {
-                            # Pobierz nazwy kolejek
-                            $qData = "DISPLAY QLOCAL(*) GET PUT" | runmqsc $qmName 2>$null
-                            $currentQueue = $null
-
+                            $qData = "DISPLAY QLOCAL(*)" | runmqsc $qmName 2>$null
                             foreach ($q in $qData) {
                                 if ($q -match 'QUEUE\s*\(\s*([^\)]+)\s*\)') {
                                     $qn = $Matches[1].Trim()
                                     if ($qn -notmatch '^SYSTEM\.|^AMQ\.') {
-                                        $currentQueue = @{
-                                            QueueName = $qn
-                                            GetEnabled = $true
-                                            PutEnabled = $true
-                                            CurrentDepth = 0
-                                        }
-                                        $queues += $currentQueue
-                                    } else {
-                                        $currentQueue = $null
-                                    }
-                                }
-                                if ($currentQueue) {
-                                    if ($q -match 'GET\s*\(\s*([^\)]+)\s*\)') {
-                                        $currentQueue.GetEnabled = ($Matches[1].Trim() -eq "ENABLED")
-                                    }
-                                    if ($q -match 'PUT\s*\(\s*([^\)]+)\s*\)') {
-                                        $currentQueue.PutEnabled = ($Matches[1].Trim() -eq "ENABLED")
-                                    }
-                                }
-                            }
-
-                            # Pobierz CURDEPTH dla kolejek
-                            $qsData = "DISPLAY QSTATUS(*) CURDEPTH" | runmqsc $qmName 2>$null
-                            foreach ($qs in $qsData) {
-                                if ($qs -match 'QUEUE\s*\(\s*([^\)]+)\s*\)') {
-                                    $qsName = $Matches[1].Trim()
-                                    $matchingQueue = $queues | Where-Object { $_.QueueName -eq $qsName }
-                                    if ($matchingQueue -and $qs -match 'CURDEPTH\s*\(\s*(\d+)\s*\)') {
-                                        $matchingQueue.CurrentDepth = [int]$Matches[1]
+                                        $queues += @{ QueueName = $qn }
                                     }
                                 }
                             }
