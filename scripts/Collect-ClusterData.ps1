@@ -2,7 +2,8 @@
 # =============================================================================
 # Collect-ClusterData.ps1
 # Scalony skrypt: status klastrow Windows + historia przelaczen rol
-# Wykonanie zdalne (Invoke-Command) rownolegle - wzor z Collect-ServerHealth.ps1
+# Pobiera dane z clusters.json dla cluster_type: SQL, FileShare
+# Wykonanie zdalne (Invoke-Command) rownolegle
 # =============================================================================
 param(
     [int]$ThrottleLimit = 50,
@@ -70,7 +71,7 @@ if (-not (Test-Path $ClustersConfigPath)) {
 
 $clustersData = Get-Content $ClustersConfigPath -Raw | ConvertFrom-Json
 
-# Wyodrebnij klastry SQL i FileShare (nie MQ - one nie maja FailoverClustering)
+# Wyodrebnij klastry SQL i FileShare (klastry Windows z FailoverClustering)
 $clusterDefs = @($clustersData.clusters | Where-Object { $_.cluster_type -in @("SQL", "FileShare") })
 
 if ($clusterDefs.Count -eq 0) {
@@ -94,13 +95,15 @@ if ($clusterDefs.Count -eq 0) {
     exit 0
 }
 
-# Zbierz wszystkie serwery i ich typy
+# Zbierz wszystkie serwery i ich typy/nazwy klastrow
 $serverTypeMap = @{}
+$serverClusterNameMap = @{}
 $allServers = @()
 
 foreach ($def in $clusterDefs) {
     foreach ($srv in $def.servers) {
         $serverTypeMap[$srv] = $def.cluster_type
+        $serverClusterNameMap[$srv] = $def.cluster_name
         $allServers += $srv
     }
 }
@@ -245,6 +248,7 @@ foreach ($r in $rawResults) {
 
     $srv = $r.PSComputerName
     $clusterType = $serverTypeMap[$srv]
+    $configClusterName = $serverClusterNameMap[$srv]
 
     if ($r.Error) {
         Write-Log "FAIL: $srv - $($r.Error)"
@@ -255,7 +259,7 @@ foreach ($r in $rawResults) {
             $processedClusters[$clusterKey] = $true
 
             $errorCluster = @{
-                ClusterName = $srv
+                ClusterName = $configClusterName
                 ClusterType = $clusterType
                 Error = $r.Error
                 Nodes = @()
@@ -280,6 +284,7 @@ foreach ($r in $rawResults) {
 
     $clusterObj = @{
         ClusterName = $clusterName
+        ConfigName = $configClusterName
         ClusterType = $clusterType
         Error = $null
         Nodes = @($r.ClusterData.Nodes)
@@ -312,10 +317,11 @@ $okServers = @($rawResults | ForEach-Object { $_.PSComputerName })
 foreach ($srv in $allServers) {
     if ($srv -notin $okServers) {
         $clusterType = $serverTypeMap[$srv]
+        $configClusterName = $serverClusterNameMap[$srv]
         Write-Log "FAIL: $srv - Niedostepny"
 
         $errorCluster = @{
-            ClusterName = $srv
+            ClusterName = $configClusterName
             ClusterType = $clusterType
             Error = "Niedostepny"
             Nodes = @()

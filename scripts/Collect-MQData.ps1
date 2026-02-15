@@ -2,7 +2,8 @@
 # =============================================================================
 # Collect-MQData.ps1
 # Scalony skrypt: kolejki MQ + status klastrow WMQ
-# Wykonanie zdalne (Invoke-Command) rownolegle - wzor z Collect-ServerHealth.ps1
+# Pobiera dane z clusters.json dla cluster_type: WMQ
+# Wykonanie zdalne (Invoke-Command) rownolegle
 # =============================================================================
 param(
     [int]$ThrottleLimit = 50
@@ -42,10 +43,10 @@ function Write-Log {
 Write-Log "=== START Collect-MQData ==="
 $startTime = Get-Date
 
-# Wczytaj konfiguracje MQ
-$MQConfigPath = "$ConfigPath\mq_servers.json"
-if (-not (Test-Path $MQConfigPath)) {
-    Write-Log "BLAD: Brak pliku mq_servers.json"
+# Wczytaj konfiguracje z clusters.json
+$ClustersConfigPath = "$ConfigPath\clusters.json"
+if (-not (Test-Path $ClustersConfigPath)) {
+    Write-Log "BLAD: Brak pliku clusters.json"
     $emptyResult = @{
         LastUpdate = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
         CollectionDuration = "0"
@@ -64,22 +65,13 @@ if (-not (Test-Path $MQConfigPath)) {
     exit 1
 }
 
-$mqConfig = Get-Content $MQConfigPath -Raw | ConvertFrom-Json
+$clustersData = Get-Content $ClustersConfigPath -Raw | ConvertFrom-Json
 
-# Zbuduj mape serwer -> klaster oraz liste serwerow
-$serverClusterMap = @{}
-$targetServers = @()
-$mqConfig.PSObject.Properties | ForEach-Object {
-    $clusterName = $_.Name
-    foreach ($srv in $_.Value) {
-        $serverClusterMap[$srv] = $clusterName
-        $targetServers += $srv
-    }
-}
-$targetServers = @($targetServers | Select-Object -Unique)
+# Wyodrebnij klastry WMQ
+$wmqClusters = @($clustersData.clusters | Where-Object { $_.cluster_type -eq "WMQ" })
 
-if ($targetServers.Count -eq 0) {
-    Write-Log "Brak serwerow MQ w konfiguracji"
+if ($wmqClusters.Count -eq 0) {
+    Write-Log "Brak klastrow WMQ w konfiguracji"
     @{
         LastUpdate = (Get-Date).ToString("yyyy-MM-dd HH:mm:ss")
         CollectionDuration = "0"
@@ -96,6 +88,18 @@ if ($targetServers.Count -eq 0) {
     } | ConvertTo-Json -Depth 10 | Out-File $OutputClusters -Encoding UTF8
     exit 0
 }
+
+# Zbuduj mape serwer -> klaster oraz liste serwerow
+$serverClusterMap = @{}
+$targetServers = @()
+
+foreach ($cluster in $wmqClusters) {
+    foreach ($srv in $cluster.servers) {
+        $serverClusterMap[$srv] = $cluster.cluster_name
+        $targetServers += $srv
+    }
+}
+$targetServers = @($targetServers | Select-Object -Unique)
 
 Write-Log "Serwery MQ ($($targetServers.Count)): $($targetServers -join ', ')"
 
@@ -185,7 +189,7 @@ foreach ($r in $rawResults) {
 
         [void]$servers.Add(@{
             ServerName = $r.ServerName
-            Description = $serverClusterMap[$srv]
+            ClusterName = $serverClusterMap[$srv]
             IPAddress = $r.IPAddress
             Error = $null
             QueueManagers = @($r.QueueManagers)
@@ -202,7 +206,7 @@ foreach ($srv in $targetServers) {
     if ($srv -notin $okServers) {
         [void]$servers.Add(@{
             ServerName = $srv
-            Description = $serverClusterMap[$srv]
+            ClusterName = $serverClusterMap[$srv]
             IPAddress = ""
             Error = "Niedostepny"
             QueueManagers = @()
@@ -228,13 +232,13 @@ Write-Log "Zapisano: $OutputKolejki"
 $clusterData = @{}
 
 foreach ($s in $servers) {
-    $clusterName = $s.Description
+    $clusterName = $s.ClusterName
     if (-not $clusterName) { continue }
 
     if (-not $clusterData[$clusterName]) {
         $clusterData[$clusterName] = @{
             ClusterName = $clusterName
-            ClusterType = "MQ"
+            ClusterType = "WMQ"
             Error = $null
             Nodes = @()
             Roles = @()

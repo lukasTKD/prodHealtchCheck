@@ -2,7 +2,8 @@
 # =============================================================================
 # Collect-InfraData.ps1
 # Scalony skrypt: instancje SQL + udzialy sieciowe FileShare
-# Wykonanie zdalne (Invoke-Command) rownolegle - wzor z Collect-ServerHealth.ps1
+# Pobiera dane z clusters.json dla cluster_type: SQL_Roles, FileShare_Roles
+# Wykonanie zdalne (Invoke-Command) rownolegle
 # =============================================================================
 param(
     [int]$ThrottleLimit = 50
@@ -63,49 +64,37 @@ if (-not (Test-Path $ClustersConfigPath)) {
 
 $clustersData = Get-Content $ClustersConfigPath -Raw | ConvertFrom-Json
 
-# Wyodrebnij serwery SQL i FileShare
-$sqlServers = @($clustersData.clusters | Where-Object { $_.cluster_type -eq "SQL" } | ForEach-Object { $_.servers } | ForEach-Object { $_ } | Select-Object -Unique)
-$fileShareServers = @($clustersData.clusters | Where-Object { $_.cluster_type -eq "FileShare" } | ForEach-Object { $_.servers } | ForEach-Object { $_ } | Select-Object -Unique)
+# Wyodrebnij role SQL i FileShare
+$sqlRoles = @($clustersData.clusters | Where-Object { $_.cluster_type -eq "SQL_Roles" })
+$fileShareRoles = @($clustersData.clusters | Where-Object { $_.cluster_type -eq "FileShare_Roles" })
 
-Write-Log "Serwery SQL ($($sqlServers.Count)): $($sqlServers -join ', ')"
+# Zbierz serwery SQL (instancje z portem lub bez)
+$sqlServers = @()
+foreach ($role in $sqlRoles) {
+    $sqlServers += $role.servers
+}
+$sqlServers = @($sqlServers | Select-Object -Unique)
+
+# Zbierz serwery FileShare
+$fileShareServers = @()
+foreach ($role in $fileShareRoles) {
+    $fileShareServers += $role.servers
+}
+$fileShareServers = @($fileShareServers | Select-Object -Unique)
+
+Write-Log "Instancje SQL ($($sqlServers.Count)): $($sqlServers -join ', ')"
 Write-Log "Serwery FileShare ($($fileShareServers.Count)): $($fileShareServers -join ', ')"
 
 # ============================================================================
-# CZESC 1: Instancje SQL
+# CZESC 1: Instancje SQL (lacza sie bezposrednio przez SqlClient)
 # ============================================================================
 $sqlInstances = [System.Collections.ArrayList]::new()
 
 if ($sqlServers.Count -gt 0) {
-    # ScriptBlock dla SQL - wykonuje zapytanie SQL lokalnie na serwerze
-    $SqlScriptBlock = {
-        $result = @{
-            ServerName = $env:COMPUTERNAME
-            SQLVersion = "N/A"
-            DatabaseCount = 0
-            TotalSizeMB = 0
-            Error = $null
-            Databases = @()
-        }
+    # Dla SQL uzywamy bezposredniego polaczenia SqlClient (nie Invoke-Command)
+    # poniewaz serwery moga byc rolami klastrowymi (VIP/DNS)
 
-        try {
-            # Znajdz instancje SQL na serwerze
-            $sqlServices = Get-Service -Name "MSSQL*" -ErrorAction SilentlyContinue | Where-Object { $_.Status -eq "Running" }
-
-            if ($sqlServices) {
-                # Ustal nazwe instancji
-                $instanceName = $env:COMPUTERNAME
-                foreach ($svc in $sqlServices) {
-                    if ($svc.Name -eq "MSSQLSERVER") {
-                        $instanceName = $env:COMPUTERNAME
-                        break
-                    } elseif ($svc.Name -match "MSSQL\$(.+)") {
-                        $instanceName = "$env:COMPUTERNAME\$($Matches[1])"
-                        break
-                    }
-                }
-
-                # Wykonaj zapytanie SQL
-                $query = @"
+    $query = @"
 SELECT
     d.name AS DatabaseName,
     d.compatibility_level AS CompatibilityLevel,
@@ -119,8 +108,30 @@ GROUP BY d.name, d.compatibility_level
 ORDER BY d.name;
 "@
 
-                # Uzyj SqlClient zamiast Invoke-Sqlcmd (nie wymaga modulu)
-                $connectionString = "Server=$instanceName;Database=master;Integrated Security=True;Connection Timeout=10"
+    # Rownolegle zapytania SQL za pomoca runspace pool
+    $runspacePool = [runspacefactory]::CreateRunspacePool(1, $ThrottleLimit)
+    $runspacePool.Open()
+
+    $jobs = @()
+
+    foreach ($server in $sqlServers) {
+        $powershell = [powershell]::Create()
+        $powershell.RunspacePool = $runspacePool
+
+        [void]$powershell.AddScript({
+            param($server, $query)
+
+            $result = @{
+                ServerName = $server
+                SQLVersion = "N/A"
+                DatabaseCount = 0
+                TotalSizeMB = 0
+                Error = $null
+                Databases = @()
+            }
+
+            try {
+                $connectionString = "Server=$server;Database=master;Integrated Security=True;Connection Timeout=10"
                 $connection = New-Object System.Data.SqlClient.SqlConnection($connectionString)
                 $connection.Open()
 
@@ -156,56 +167,61 @@ ORDER BY d.name;
                 $result.DatabaseCount = $databases.Count
                 $result.TotalSizeMB = [math]::Round($totalSize, 0)
                 $result.Databases = $databases
-            } else {
-                $result.Error = "Brak uruchomionej instancji SQL"
+
+            } catch {
+                $result.Error = $_.Exception.Message
+            }
+
+            $result
+        })
+
+        [void]$powershell.AddArgument($server)
+        [void]$powershell.AddArgument($query)
+
+        $jobs += @{
+            PowerShell = $powershell
+            Handle = $powershell.BeginInvoke()
+            Server = $server
+        }
+    }
+
+    # Zbierz wyniki
+    foreach ($job in $jobs) {
+        try {
+            $r = $job.PowerShell.EndInvoke($job.Handle)
+
+            if ($r) {
+                [void]$sqlInstances.Add(@{
+                    ServerName = $r.ServerName
+                    SQLVersion = $r.SQLVersion
+                    DatabaseCount = $r.DatabaseCount
+                    TotalSizeMB = $r.TotalSizeMB
+                    Error = $r.Error
+                    Databases = @($r.Databases)
+                })
+
+                if ($r.Error) {
+                    Write-Log "SQL FAIL: $($r.ServerName) - $($r.Error)"
+                } else {
+                    Write-Log "SQL OK: $($r.ServerName) ($($r.DatabaseCount) baz, $([math]::Round($r.TotalSizeMB/1024, 1)) GB)"
+                }
             }
         } catch {
-            $result.Error = $_.Exception.Message
-        }
-
-        $result
-    }
-
-    # Wykonaj rownolegle
-    $sqlResults = Invoke-Command -ComputerName $sqlServers -ScriptBlock $SqlScriptBlock -ThrottleLimit $ThrottleLimit -ErrorAction SilentlyContinue -ErrorVariable sqlErrs
-
-    $okSqlServers = @()
-
-    foreach ($r in $sqlResults) {
-        if ($r.ServerName) {
-            $okSqlServers += $r.PSComputerName
-
             [void]$sqlInstances.Add(@{
-                ServerName = $r.ServerName
-                SQLVersion = $r.SQLVersion
-                DatabaseCount = $r.DatabaseCount
-                TotalSizeMB = $r.TotalSizeMB
-                Error = $r.Error
-                Databases = @($r.Databases)
-            })
-
-            if ($r.Error) {
-                Write-Log "SQL FAIL: $($r.ServerName) - $($r.Error)"
-            } else {
-                Write-Log "SQL OK: $($r.ServerName) ($($r.DatabaseCount) baz, $([math]::Round($r.TotalSizeMB/1024, 1)) GB)"
-            }
-        }
-    }
-
-    # Serwery ktore nie odpowiedzialy
-    foreach ($srv in $sqlServers) {
-        if ($srv -notin $okSqlServers) {
-            [void]$sqlInstances.Add(@{
-                ServerName = $srv
+                ServerName = $job.Server
                 SQLVersion = "N/A"
                 DatabaseCount = 0
                 TotalSizeMB = 0
-                Error = "Niedostepny"
+                Error = $_.Exception.Message
                 Databases = @()
             })
-            Write-Log "SQL FAIL: $srv - Niedostepny"
+            Write-Log "SQL FAIL: $($job.Server) - $($_.Exception.Message)"
         }
+        $job.PowerShell.Dispose()
     }
+
+    $runspacePool.Close()
+    $runspacePool.Dispose()
 }
 
 # ============================================================================
